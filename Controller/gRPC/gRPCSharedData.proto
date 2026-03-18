@@ -1,0 +1,83 @@
+﻿syntax = "proto3";
+package gRPCSharedData;
+option csharp_namespace = "Shared.HmiService";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service HmiService {
+// 唯一的通用指令接口
+rpc SendCommand (ControlCommandRequest) returns (ControlCommandResponse);
+
+// 订阅事件流
+rpc SubscribeEvent (google.protobuf.Empty) returns (stream EventEnvelope);
+
+// 订阅控制卡状态
+rpc SubscribeHwStatus (google.protobuf.Empty) returns (stream HwStatus);
+
+// 控制卡复位请求
+rpc ResetHw (google.protobuf.Empty) returns (ResetHwReply);
+
+rpc UploadRecipe (RecipeUploadRequest) returns (RecipeUploadResponse);
+}
+
+message ControlCommandRequest {
+string target_unit = 1; // 第一层路由：目标 Unit (如 "MixingUnit01")
+string target_object = 2; // 第二层路由：目标子部件 (如 "InletValve", "Agitator", 或空代表Unit本身)
+string command_name = 3; // 动作 (如 "Open", "SetSpeed", "Reset")
+map<string, string> params = 4; // 参数 (如 "Speed": "50.0")
+string json_payload = 5;
+}
+
+message ControlCommandResponse {
+bool success = 1;
+string message = 2;
+}
+
+message EventEnvelope {
+int32 event_id = 1;
+string source_name = 2;
+Severity severity = 3;
+string message = 4;
+google.protobuf.Timestamp time_raised = 5;
+
+oneof payload {
+AlarmPayload alarm = 6;
+}
+}
+
+enum Severity {
+INFO = 0;
+WARNING = 1;
+ERROR = 2;
+}
+
+message AlarmPayload {
+bool is_active = 1; // true=Arrived, false=Left
+google.protobuf.Timestamp time_cleared = 2;
+}
+
+message HwStatus {
+bool is_faulted = 1;
+bool is_reset_needed = 2;
+int32 error_code = 3;
+string message = 4;
+}
+
+message ResetHwReply {
+bool success = 1;
+string message = 2;
+}
+
+// 配方上载请求 (HMI <- PLC)
+message RecipeUploadRequest {
+  string target_unit = 1;
+}
+
+// 配方上载响应
+message RecipeUploadResponse {
+  bool success = 1;
+  string message = 2;
+  string recipe_name = 3;
+  string json_payload = 4;
+}
