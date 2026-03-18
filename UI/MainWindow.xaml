@@ -1,0 +1,42 @@
+﻿<Window x:Class="UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:UI"
+        mc:Ignorable="d"
+        xmlns:views="clr-namespace:UI.Views"
+        xmlns:vm="clr-namespace:UI.ViewModels"
+        WindowStyle="None" WindowState="Maximized"
+        Width="1600"
+        Height="900"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource Brush.PageBackground}">
+    
+    <Window.Resources>
+        <DataTemplate DataType="{x:Type vm:PagePlaceholderViewModel}">
+            <views:PagePlaceholderView />
+        </DataTemplate>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource Brush.PageBackground}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="65" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="65" />
+        </Grid.RowDefinitions>
+
+        <views:TopBarView Grid.Row="0"
+                          DataContext="{Binding TopBar}" />
+
+        <Border Grid.Row="1"
+                Background="{StaticResource Brush.PageBackground}"
+                Padding="16">
+            <ContentControl Content="{Binding CurrentPage}" />
+        </Border>
+
+        <Border Grid.Row="2" Height="60" VerticalAlignment="Bottom" Background="{StaticResource Brush.BottomNavBackground2}" />
+        <views:BottomNavView Grid.Row="2"
+                             DataContext="{Binding BottomNav}" />
+    </Grid>
+</Window>

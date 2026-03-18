@@ -1,0 +1,123 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Style x:Key="TopBarSegmentBorderStyle" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{StaticResource Brush.TopBarBorder}" />
+        <Setter Property="BorderThickness" Value="0,0,1,0" />
+        <Setter Property="Padding" Value="14,10" />
+    </Style>
+
+    <Style x:Key="TopBarPrimaryTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource Brush.TopBarPrimaryText}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <Style x:Key="TopBarSecondaryTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource Brush.TopBarSecondaryText}" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <!-- 单项组按钮 -->
+    <Style x:Key="BottomStandaloneGroupButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource Brush.BottomNavText}" />
+        <Setter Property="Background" Value="{StaticResource Brush.BottomStandaloneBackground2}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="Center"
+                                          VerticalAlignment="Center" />
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomStandaloneHover}" />
+                        </Trigger>
+
+                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomStandaloneSelected}" />
+                        </DataTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 复合组组头 -->
+    <Style x:Key="BottomGroupHeaderButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource Brush.BottomNavText}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="14,8" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="Center"
+                                          VerticalAlignment="Center" />
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomGroupHeaderHover}" />
+                        </Trigger>
+
+                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomGroupHeaderSelected}" />
+                        </DataTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 二级项按钮 -->
+    <Style x:Key="BottomSubItemButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource Brush.BottomNavText}" />
+        <Setter Property="Background" Value="{StaticResource Brush.BottomSubItemNormal}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="14,8" />
+        <Setter Property="Margin" Value="0 5 5 10" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="Center"
+                                          VerticalAlignment="Center" />
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomSubItemHover}" />
+                        </Trigger>
+
+                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Brush.BottomSubItemSelected}" />
+                        </DataTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

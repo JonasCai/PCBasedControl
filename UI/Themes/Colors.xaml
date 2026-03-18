@@ -1,0 +1,54 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 页面与通用颜色 -->
+    <SolidColorBrush x:Key="Brush.PageBackground" Color="#E8EDF2" />
+    <SolidColorBrush x:Key="Brush.CardBackground" Color="#F7F9FB" />
+    <SolidColorBrush x:Key="Brush.CardBorder" Color="#D7E0E8" />
+
+    <SolidColorBrush x:Key="Brush.TextPrimary" Color="#1E2A36" />
+    <SolidColorBrush x:Key="Brush.TextSecondary" Color="#6E7C89" />
+
+    <!-- 顶部状态栏 -->
+    <LinearGradientBrush x:Key="Brush.TopBarBackground2"  StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#3774C3" Offset="0.0" />
+        <GradientStop Color="#15355E" Offset="0.7" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="Brush.TopBarBackground" Color="#0F4E84" />
+    <SolidColorBrush x:Key="Brush.TopBarBorder" Color="#0B3E69" />
+    <SolidColorBrush x:Key="Brush.TopBarPrimaryText" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Brush.TopBarSecondaryText" Color="#D7E7F4" />
+
+
+    <!-- 底部导航 -->
+    <SolidColorBrush x:Key="Brush.BottomNavBackground2" Color="#204880" />
+    <LinearGradientBrush x:Key="Brush.BottomStandaloneBackground2"  StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#3A78D3" Offset="0.0" />
+        <GradientStop Color="#265394" Offset="0.9" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="Brush.BottomGroupBackground2"  StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#3A78D3" Offset="0.0" />
+        <GradientStop Color="#265394" Offset="0.4" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="Brush.BottomStandaloneSelected" Color="#14325A" />
+    <SolidColorBrush x:Key="Brush.BottomSubItemSelected" Color="#14325A" />
+    <SolidColorBrush x:Key="Brush.BottomSubItemNormal" Color="#3A78D3" />
+
+    <SolidColorBrush x:Key="Brush.BottomNavBackground" Color="#005EAA" />
+    <SolidColorBrush x:Key="Brush.BottomNavBorder" Color="#0B4E8A" />
+    <SolidColorBrush x:Key="Brush.BottomNavText" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Brush.BottomNavDivider" Color="#0E67AF" />
+
+    <SolidColorBrush x:Key="Brush.BottomStandaloneNormal" Color="#0A4B84" />
+    <SolidColorBrush x:Key="Brush.BottomStandaloneHover" Color="#1262A5" />
+    
+
+    <SolidColorBrush x:Key="Brush.BottomGroupHeaderNormal" Color="#0A4B84" />
+    <SolidColorBrush x:Key="Brush.BottomGroupHeaderHover" Color="#1262A5" />
+    <SolidColorBrush x:Key="Brush.BottomGroupHeaderSelected" Color="#083A68" />
+
+    
+    <SolidColorBrush x:Key="Brush.BottomSubItemHover" Color="#1F86D8" />
+    
+
+</ResourceDictionary>

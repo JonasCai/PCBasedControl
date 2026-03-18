@@ -1,0 +1,85 @@
+﻿<UserControl x:Class="UI.Views.TopBarView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+             xmlns:local="clr-namespace:UI.Views"
+             mc:Ignorable="d">
+    
+    <Border Background="{StaticResource Brush.TopBarBackground2}" BorderThickness="0">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="60" />
+                <ColumnDefinition Width="150" />
+                <ColumnDefinition Width="250" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="150" />
+                <ColumnDefinition Width="75" />
+                <ColumnDefinition Width="100" />
+                <ColumnDefinition Width="150" />
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <materialDesign:PackIcon Kind="Menu" Width="28" Height="28" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="White" Margin="0" />
+            </Border>
+            <!-- 运行状态 -->
+            <Border Grid.Column="1" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <materialDesign:PackIcon Kind="PlayCircleOutline" Width="28" Height="28" VerticalAlignment="Center" Foreground="White" Margin="0,0,10,0" />
+                    <StackPanel>
+                        <TextBlock Text="{Binding EquipmentStatus}" Style="{StaticResource TopBarPrimaryTextStyle}" />
+                        <TextBlock Text="{Binding StatusDetail}" Style="{StaticResource TopBarSecondaryTextStyle}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <!-- 配方信息 -->
+            <Border Grid.Column="2" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <materialDesign:PackIcon Kind="FileDocumentOutline" Width="28" Height="28" VerticalAlignment="Center" Foreground="White" Margin="0,0,10,0" />
+                    <StackPanel>
+                        <TextBlock Text="{Binding RecipeName}" Style="{StaticResource TopBarPrimaryTextStyle}" />
+                        <TextBlock Text="{Binding RecipeDetail}" Style="{StaticResource TopBarSecondaryTextStyle}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <!-- 报警状态 -->
+            <Border Grid.Column="3" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <materialDesign:PackIcon Kind="ShieldCheckOutline" Width="28" Height="28" VerticalAlignment="Center" Foreground="White" Margin="0,0,10,0" />
+                    <StackPanel>
+                        <TextBlock Text="{Binding AlarmSummary}" Style="{StaticResource TopBarPrimaryTextStyle}" />
+                        <TextBlock Text="{Binding AlarmDetail}" Style="{StaticResource TopBarSecondaryTextStyle}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <!-- 操作员 -->
+            <Border Grid.Column="4" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <materialDesign:PackIcon Kind="AccountCircleOutline" Width="28" Height="28" VerticalAlignment="Center" Foreground="White" Margin="0,0,8,0" />
+                    <StackPanel>
+                        <TextBlock Text="{Binding OperatorName}" Style="{StaticResource TopBarPrimaryTextStyle}" FontSize="13" />
+                        <TextBlock Text="操作员" Style="{StaticResource TopBarSecondaryTextStyle}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <!-- 语言 -->
+            <Border Grid.Column="5" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="{Binding LanguageText}" Style="{StaticResource TopBarPrimaryTextStyle}" HorizontalAlignment="Center" FontSize="13" />
+                    <TextBlock Text="语言" Style="{StaticResource TopBarSecondaryTextStyle}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+            <!-- 时间 -->
+            <Border Grid.Column="6" Style="{StaticResource TopBarSegmentBorderStyle}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="{Binding TimeText}" Style="{StaticResource TopBarPrimaryTextStyle}" HorizontalAlignment="Center" FontSize="13" />
+                    <TextBlock Text="{Binding DateText}" Style="{StaticResource TopBarSecondaryTextStyle}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+            <!-- Logo -->
+            <Border Grid.Column="7" Padding="16,10">
+                <TextBlock Text="{Binding LogoText}" Foreground="White" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>
