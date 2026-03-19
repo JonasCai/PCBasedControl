@@ -8,10 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="gRPC\gRPCSharedData.proto" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
     <PackageReference Include="MongoDB.Driver" Version="3.7.0" />
@@ -22,6 +18,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="gRPC\gRPCSharedData.proto" GrpcServices="Server" />
+    <ProjectReference Include="..\Common\Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="..\Common\gRPCSharedData.proto" GrpcServices="Server">
+      <Link>gRPC\gRPCSharedData.proto</Link>
+    </Protobuf>
   </ItemGroup>
 </Project>

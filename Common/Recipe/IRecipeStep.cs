@@ -1,7 +1,7 @@
 ﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Controller.Recipe;
+namespace Common.Recipe;
 
 // 指定 JSON 中用来区分类型的字段名为 "StepType"
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "StepType")] 

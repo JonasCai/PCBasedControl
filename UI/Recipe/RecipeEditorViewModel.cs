@@ -1,6 +1,6 @@
+using Common.Recipe;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Controller.Recipe;
 using MaterialDesignThemes.Wpf;
 using System.Collections.ObjectModel;
 using System.Windows.Media;

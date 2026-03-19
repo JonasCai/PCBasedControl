@@ -1,4 +1,5 @@
-﻿using Controller.EventLogger;
+﻿using Common.Recipe;
+using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.Recipe;
 using Controller.S88;
