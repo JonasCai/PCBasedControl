@@ -1,4 +1,5 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
+using UI.Recipe;
 using UI.Services;
 
 namespace UI.ViewModels;
@@ -36,7 +37,7 @@ public partial class MainWindowViewModel : ObservableObject
             "总览" => new PagePlaceholderViewModel("总览", "显示整机运行摘要、核心参数、当前批次与关键上下文。"),
 
             "工艺/运行" => new PagePlaceholderViewModel("工艺 / 运行", "显示当前工艺运行状态、阶段、步骤上下文和运行摘要。"),
-            "工艺/配方" => new PagePlaceholderViewModel("工艺 / 配方", "显示配方列表、配方编辑、步骤参数与版本管理。"),
+            "工艺/配方" => new RecipeEditorViewModel(),
             "工艺/维护" => new PagePlaceholderViewModel("工艺 / 维护", "显示工艺维护相关参数、校准与维护操作入口。"),
 
             "自动化/上料" => new PagePlaceholderViewModel("自动化 / 上料", "显示上料机构状态、上料流程、到位与联锁状态。"),
