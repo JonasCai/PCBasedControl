@@ -76,116 +76,179 @@
             <Setter Property="Height" Value="42"/>
         </Style>
 
-        <DataTemplate x:Key="StepInsertMenuItemTemplate" DataType="{x:Type local:StepInsertMenuItemViewModel}">
-            <StackPanel Orientation="Horizontal">
-                <Border Width="18"
-                    Height="18"
-                    CornerRadius="4"
-                    Background="{Binding ColorBrush}"
-                    VerticalAlignment="Center">
-                    <materialDesign:PackIcon Kind="{Binding IconKind}"
-                                         Width="12"
-                                         Height="12"
-                                         Foreground="White"
-                                         HorizontalAlignment="Center"
-                                         VerticalAlignment="Center"/>
-                </Border>
-                <TextBlock Text="{Binding Header}"
-                       Margin="8,0,0,0"
-                       VerticalAlignment="Center"/>
-            </StackPanel>
-        </DataTemplate>
-
         <ContextMenu x:Key="StepNodeContextMenu"
-                 DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
+             Background="White"
+             BorderBrush="#E0E0E0"
+             BorderThickness="1"
+             Padding="4">
 
-            <MenuItem Header="前插步骤"
-                  ItemsSource="{Binding PlacementTarget.Tag.InsertBeforeMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <ContextMenu.Resources>
+                <materialDesign:BrushOpacityConverter x:Key="BrushOpacityConverter" />
+
+                <Style TargetType="{x:Type ContextMenu}">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="{x:Type ContextMenu}">
+                                <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8" 
+                                Margin="0,0,12,12" Padding="{TemplateBinding Padding}">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="14" ShadowDepth="4" Opacity="0.08" Color="Black"/>
+                                    </Border.Effect>
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                        <ItemsPresenter KeyboardNavigation.TabNavigation="Cycle" Grid.IsSharedSizeScope="True" />
+                                    </ScrollViewer>
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+
+                <Style TargetType="MenuItem">
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="Foreground" Value="#333333"/>
+                    <Setter Property="Padding" Value="10,6"/>
+                    <Setter Property="Margin" Value="2,1"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="MenuItem">
+                                <Border x:Name="Border" 
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}"
+                                Margin="{TemplateBinding Margin}"
+                                TextElement.Foreground="{TemplateBinding Foreground}"
+                                SnapsToDevicePixels="True">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" SharedSizeGroup="Icon"/>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" SharedSizeGroup="Arrow"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <ContentPresenter x:Name="Icon" ContentSource="Icon" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,12,0"/>
+                                        <ContentPresenter x:Name="HeaderHost" Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" VerticalAlignment="Center" Margin="0,0,16,0"/>
+
+                                        <Path x:Name="RightArrow" Grid.Column="2" Visibility="Collapsed" 
+                                            VerticalAlignment="Center" Margin="12,0,0,0" 
+                                            Data="M0,0 L4,4 L0,8 Z" Fill="#B0B0B0"/>
+
+                                        <Popup x:Name="PART_Popup" AllowsTransparency="True" Placement="Right" 
+                                            IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}" 
+                                            Focusable="False" PopupAnimation="Fade">
+                                            <Border Background="White" 
+                                                BorderBrush="#E0E0E0" 
+                                                BorderThickness="1" 
+                                                CornerRadius="8" 
+                                                Margin="2,0,16,16" 
+                                                Padding="4">
+                                                <Border.Effect>
+                                                    <DropShadowEffect BlurRadius="14" ShadowDepth="4" Opacity="0.08" Color="Black"/>
+                                                </Border.Effect>
+                                                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                                    <ItemsPresenter Grid.IsSharedSizeScope="True" KeyboardNavigation.TabNavigation="Cycle"/>
+                                                </ScrollViewer>
+                                            </Border>
+                                        </Popup>
+                                    </Grid>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="Role" Value="SubmenuHeader">
+                                        <Setter TargetName="RightArrow" Property="Visibility" Value="Visible"/>
+                                    </Trigger>
+                                    <Trigger Property="IsHighlighted" Value="True">
+                                        <Setter TargetName="Border" Property="Background" Value="#F2F2F4"/>
+                                    </Trigger>
+                                    <Trigger Property="IsEnabled" Value="False">
+                                        <Setter TargetName="Border" Property="Opacity" Value="0.4"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+
+                <Style TargetType="Separator">
+                    <Setter Property="Background" Value="#EBEBEB"/>
+                    <Setter Property="Margin" Value="4,2"/>
+                    <Setter Property="Height" Value="1"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Separator">
+                                <Rectangle Fill="{TemplateBinding Background}" Height="{TemplateBinding Height}"/>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+
+                <DataTemplate x:Key="StepInsertMenuItemTemplate" DataType="{x:Type local:StepInsertMenuItemViewModel}">
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="24" Height="24" CornerRadius="6"
+                            Background="{Binding ColorBrush, Converter={StaticResource BrushOpacityConverter}, ConverterParameter=0.15}"
+                            VerticalAlignment="Center">
+                            <materialDesign:PackIcon Kind="{Binding IconKind}" Width="14" Height="14"
+                                             Foreground="{Binding ColorBrush}"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <TextBlock Text="{Binding Header}" Margin="12,0,0,0" FontSize="13" FontWeight="Medium" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </DataTemplate>
+
+                <Style x:Key="DynamicSubMenuItemStyle" TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                    <Setter Property="Header" Value="{Binding}" />
+                    <Setter Property="HeaderTemplate" Value="{StaticResource StepInsertMenuItemTemplate}" />
+                    <Setter Property="Command" Value="{Binding ExecuteCommand}" />
+                    <Setter Property="CommandParameter" Value="{Binding}" />
+                    <Setter Property="IsEnabled" Value="{Binding IsEnabled}" />
+                </Style>
+            </ContextMenu.Resources>
+
+            <MenuItem Header="前插步骤" 
+              ItemContainerStyle="{StaticResource DynamicSubMenuItemStyle}"
+              ItemsSource="{Binding PlacementTarget.Tag.InsertBeforeMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="ArrowUpBoldBoxOutline" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="ArrowUpBoldBoxOutline" Opacity=".6"/>
                 </MenuItem.Icon>
-                <MenuItem.ItemContainerStyle>
-                    <Style TargetType="MenuItem">
-                        <Setter Property="Header" Value="{Binding}" />
-                        <Setter Property="HeaderTemplate" Value="{StaticResource StepInsertMenuItemTemplate}" />
-                        <Setter Property="Command" Value="{Binding ExecuteCommand}" />
-                        <Setter Property="CommandParameter" Value="{Binding}" />
-                        <Setter Property="IsEnabled" Value="{Binding IsEnabled}" />
-                    </Style>
-                </MenuItem.ItemContainerStyle>
             </MenuItem>
 
-            <MenuItem Header="后插步骤"
-                  ItemsSource="{Binding PlacementTarget.Tag.InsertAfterMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <MenuItem Header="后插步骤" 
+              ItemContainerStyle="{StaticResource DynamicSubMenuItemStyle}"
+              ItemsSource="{Binding PlacementTarget.Tag.InsertAfterMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="ArrowDownBoldBoxOutline" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="ArrowDownBoldBoxOutline" Opacity=".6"/>
                 </MenuItem.Icon>
-                <MenuItem.ItemContainerStyle>
-                    <Style TargetType="MenuItem">
-                        <Setter Property="Header" Value="{Binding}" />
-                        <Setter Property="HeaderTemplate" Value="{StaticResource StepInsertMenuItemTemplate}" />
-                        <Setter Property="Command" Value="{Binding ExecuteCommand}" />
-                        <Setter Property="CommandParameter" Value="{Binding}" />
-                        <Setter Property="IsEnabled" Value="{Binding IsEnabled}" />
-                    </Style>
-                </MenuItem.ItemContainerStyle>
             </MenuItem>
 
-            <MenuItem Header="插入子步骤"
-                  Visibility="{Binding IsCycle, Converter={StaticResource BoolToVisibilityConverter}}"
-                  ItemsSource="{Binding PlacementTarget.Tag.InsertChildMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <MenuItem Header="插入子步骤" Visibility="{Binding IsCycle, Converter={StaticResource BoolToVisibilityConverter}}"
+              ItemContainerStyle="{StaticResource DynamicSubMenuItemStyle}"
+              ItemsSource="{Binding PlacementTarget.Tag.InsertChildMenuItems, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="PlaylistPlus" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="PlaylistPlus" Opacity=".6"/>
                 </MenuItem.Icon>
-                <MenuItem.ItemContainerStyle>
-                    <Style TargetType="MenuItem">
-                        <Setter Property="Header" Value="{Binding}" />
-                        <Setter Property="HeaderTemplate" Value="{StaticResource StepInsertMenuItemTemplate}" />
-                        <Setter Property="Command" Value="{Binding ExecuteCommand}" />
-                        <Setter Property="CommandParameter" Value="{Binding}" />
-                        <Setter Property="IsEnabled" Value="{Binding IsEnabled}" />
-                    </Style>
-                </MenuItem.ItemContainerStyle>
             </MenuItem>
 
             <Separator/>
 
-            <MenuItem Header="上移"
-                  Command="{Binding PlacementTarget.Tag.MoveStepUpCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <MenuItem Header="上移" Command="{Binding PlacementTarget.Tag.MoveStepUpCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="ChevronUp" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="ChevronUp" />
                 </MenuItem.Icon>
             </MenuItem>
 
-            <MenuItem Header="下移"
-                  Command="{Binding PlacementTarget.Tag.MoveStepDownCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <MenuItem Header="下移" Command="{Binding PlacementTarget.Tag.MoveStepDownCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="ChevronDown" Width="18" Height="18"/>
-                </MenuItem.Icon>
-            </MenuItem>
-
-            <Separator/>
-
-            <MenuItem Header="展开"
-                  Command="{Binding PlacementTarget.Tag.ExpandSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
-                <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="UnfoldMoreHorizontal" Width="18" Height="18"/>
-                </MenuItem.Icon>
-            </MenuItem>
-
-            <MenuItem Header="折叠"
-                  Command="{Binding PlacementTarget.Tag.CollapseSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
-                <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="UnfoldLessHorizontal" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="ChevronDown" />
                 </MenuItem.Icon>
             </MenuItem>
 
             <Separator/>
 
-            <MenuItem Header="删除"
-                  Command="{Binding PlacementTarget.Tag.DeleteStepCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+            <MenuItem Header="删除步骤" Command="{Binding PlacementTarget.Tag.DeleteStepCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                 <MenuItem.Icon>
-                    <materialDesign:PackIcon Kind="DeleteOutline" Width="18" Height="18"/>
+                    <materialDesign:PackIcon Kind="DeleteOutline" />
                 </MenuItem.Icon>
             </MenuItem>
         </ContextMenu>
