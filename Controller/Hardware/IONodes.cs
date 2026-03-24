@@ -8,34 +8,38 @@ namespace Controller.Hardware;
 
 public class IONodes
 {
-    private readonly Dictionary<string, EtherCatNodeBase> _nodeMap = new();
+    private readonly EtherCatNodeBase[] _allNodes;
 
     public IONodes(IEtherCatDriver dmcDriver)
     {
-        _nodeMap.Add("A100", new TcNode4(dmcDriver, 1));
-        _nodeMap.Add("A101", new TcNode4(dmcDriver, 3));
-        _nodeMap.Add("A102", new DINode16(dmcDriver, 5));
-        _nodeMap.Add("A103", new DONode16(dmcDriver, 6));
-        _nodeMap.Add("MFC100", new MFCNode(dmcDriver, 7, 1));
-        _nodeMap.Add("MFC200", new MFCNode(dmcDriver, 8, 2));
+        _allNodes = new EtherCatNodeBase[]
+        {
+            A100 = new TcNode4(dmcDriver, 0),
+            A101 = new TcNode4(dmcDriver, 2),
+            A102 = new DINode16(dmcDriver, 4),
+            A103 = new DONode16(dmcDriver, 0),
+            MFC100 = new MFCNode(dmcDriver, 6,1),
+            MFC200 = new MFCNode(dmcDriver, 7,2),
+
+        };
     }
 
-    public TcNode4 A100 => (TcNode4)_nodeMap["A100"];
-    public TcNode4 A101 => (TcNode4)_nodeMap["A101"];
-    public DINode16 A102 => (DINode16)_nodeMap["A102"];
-    public DONode16 A103 => (DONode16)_nodeMap["A103"];
-    public MFCNode MFC100 => (MFCNode)_nodeMap["MFC100"];
-    public MFCNode MFC200 => (MFCNode)_nodeMap["MFC200"];
+    public TcNode4 A100 { get; }
+    public TcNode4 A101 { get; }
+    public DINode16 A102 { get; }
+    public DONode16 A103 { get; }
+    public MFCNode MFC100 { get; }
+    public MFCNode MFC200 { get; }
 
     public void PullAll()
     {
-        foreach (var node in _nodeMap.Values)
+        foreach (var node in _allNodes)
             node.PullInputsFromHardware();
     }
 
     public void PushAll()
     {
-        foreach (var node in _nodeMap.Values)
+        foreach (var node in _allNodes)
             node.PushOutputsToHardware();
     }
 }
