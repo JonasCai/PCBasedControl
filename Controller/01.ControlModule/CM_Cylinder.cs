@@ -1,13 +1,7 @@
 ﻿using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
-using MongoDB.Driver;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Controller._01.ControlModule;
 
@@ -20,6 +14,11 @@ public class CM_Cylinder : IControlModule
         _logger = logger;
         RegisterCommandHandlers();
 
+        //初始化防抖器
+        long debounceTime = cfg.SensorDebounceTimeMs > 0 ? cfg.SensorDebounceTimeMs : 50;
+        _extSensorFilter = new DigitalDebouncer(debounceTime);
+        _retSensorFilter = new DigitalDebouncer(debounceTime);
+
         if (!_cfg.Validate())
             throw new ArgumentException($"气缸[{_cfg.Name}]配置不完整", nameof(_cfg));
     }
@@ -27,98 +26,100 @@ public class CM_Cylinder : IControlModule
     // ==========================================
     // IControlModule 接口方法
     // ==========================================
+    public bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public bool HasAnyError => State == CylinderState.Error;
     public string Name => _cfg.Name;
     public void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
-        // 读取传感器状态
-        bool isExtended = _cfg.ReadExtendedSensor();
-        bool isRetracted = _cfg.ReadRetractedSensor();
+        // 读取原始信号
+        _rawExt = (_cfg.SensorConfig is CylinderSensorConfig.DualSensors or CylinderSensorConfig.ExtendOnly)
+                  && _cfg.ReadExtendedSensor != null ? _cfg.ReadExtendedSensor() : false;
+
+        _rawRet = (_cfg.SensorConfig is CylinderSensorConfig.DualSensors or CylinderSensorConfig.RetractOnly)
+                  && _cfg.ReadRetractedSensor != null ? _cfg.ReadRetractedSensor() : false;
+
+        // 防抖过滤
+        _physicalExt = _extSensorFilter.Filter(_rawExt, currentTimestampMs);
+        _physicalRet = _retSensorFilter.Filter(_rawRet, currentTimestampMs);
+
+        // 传感器状态推算
+        switch (_cfg.SensorConfig)
+        {
+            case CylinderSensorConfig.DualSensors:
+                _isExtended = _physicalExt;
+                _isRetracted = _physicalRet;
+                break;
+
+            case CylinderSensorConfig.ExtendOnly:
+                _isExtended = _physicalExt;
+                // 伸出位传感器熄灭 + 处于缩回状态/或正在缩回且时间达标
+                _isRetracted = !_physicalExt && (State == CylinderState.Retracted ||
+                              (State == CylinderState.ToRetractBusy && _toRetractElapsedTime >= _cfg.VirtualRetractDelayMs));
+                break;
+
+            case CylinderSensorConfig.RetractOnly:
+                _isRetracted = _physicalRet;
+                // 缩回位传感器熄灭 + 处于伸出状态/或正在伸出且时间达标
+                _isExtended = !_physicalRet && (State == CylinderState.Extended ||
+                              (State == CylinderState.ToExtendBusy && _toExtendElapsedTime >= _cfg.VirtualExtendDelayMs));
+                break;
+
+            case CylinderSensorConfig.TimeBased:
+                // 纯时间估算
+                _isExtended = State == CylinderState.Extended || (State == CylinderState.ToExtendBusy && _toExtendElapsedTime >= _cfg.VirtualExtendDelayMs);
+                _isRetracted = State == CylinderState.Retracted || (State == CylinderState.ToRetractBusy && _toRetractElapsedTime >= _cfg.VirtualRetractDelayMs);
+                break;
+        }
 
         // 处理指令队列
         ProcessCommandQueue();
 
-        // 检测两个传感器是否同时亮
-        if (_state != CylinderState.Error && isExtended && isRetracted)
-        {
-            TransitionToError(CylinderError.SensorConflict, CylinderEvents.ErrSensorConflict); //传感器信号冲突，原位和动位传感器同时亮
-            return;
-        }
+        // 评估所有物理状态并触发/解除报警
+        EvaluateAlarms(_isExtended, _isRetracted);
 
-        // 状态机逻辑
-        switch (_state)
+        // 状态机
+        switch (State)
         {
             case CylinderState.Unknown:
                 _cfg.Actuate(CylinderCmd.ToSafe);
-                if (isExtended) _state = CylinderState.Extended;
-                else if (isRetracted) _state = CylinderState.Retracted;
+                if (_isExtended) ChangeState(CylinderState.Extended);
+                else if (_isRetracted) ChangeState(CylinderState.Retracted);
                 break;
 
             case CylinderState.ToExtendBusy:
                 // 动作保持
                 _cfg.Actuate(CylinderCmd.Extend);
-                ToExtendElapsedTime = _currentTimestampMs - _toExtendStartTimestampMs;
-                // 伸出条件丢失
-                if (!_cfg.CanExtend())
+                _toExtendElapsedTime = _currentTimestampMs - _toExtendStartTimestampMs;
+                if (_isExtended)
                 {
-                    _cfg.Actuate(CylinderCmd.ToSafe);
-                    TransitionToError(CylinderError.ExtendConditionsNotMet, CylinderEvents.ErrExtendInterlockLost);//伸出动作中外部联锁条件丢失
-                }
-                // 成功伸出
-                else if (isExtended)
-                {
-                    ExtendCount++;
-                    _state = CylinderState.Extended;
-                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoExtendedDone, ToExtendElapsedTime); //伸出到位 (耗时 {ToExtendElapsedTime} ms
-                }
-                // 超时判定
-                else if (ToExtendElapsedTime > _cfg.ToExtendTout)
-                {
-                    TransitionToError(CylinderError.ExtendTimeout, CylinderEvents.ErrExtendTimeout, _cfg.ToExtendTout);//伸出动作超时 (>{ToExtendTout} ms)
+                    _extendCount++;
+                    ChangeState(CylinderState.Extended);
+                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoExtendedDone, _toExtendElapsedTime); //伸出到位 (耗时 {ToExtendElapsedTime} ms
                 }
                 break;
 
             case CylinderState.ToRetractBusy:
                 // 动作保持
                 _cfg.Actuate(CylinderCmd.Retract);
-                ToRetractElapsedTime = _currentTimestampMs - _toRetractStartTimestampMs;
-
-                // 缩回条件丢失
-                if (!_cfg.CanRetract())
+                _toRetractElapsedTime = _currentTimestampMs - _toRetractStartTimestampMs;
+                if (_isRetracted)
                 {
-                    _cfg.Actuate(CylinderCmd.ToSafe);
-                    TransitionToError(CylinderError.RetractConditionsNotMet, CylinderEvents.ErrRetractInterlockLost);//缩回动作中外部联锁条件丢失
-                }
-                // 成功缩回
-                else if (isRetracted)
-                {
-                    RetractCount++;
-                    _state = CylinderState.Retracted;
-                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoRetractedDone, ToRetractElapsedTime); //缩回到位 (耗时 {ToRetractElapsedTime} ms
-                }
-                // 超时判定
-                else if (ToRetractElapsedTime > _cfg.ToRetractTout)
-                {
-                    TransitionToError(CylinderError.RetractTimeout, CylinderEvents.ErrRetractTimeout, _cfg.ToRetractTout); //缩回动作超时 (>{ToRetractTout} ms)
+                    _retractCount++;
+                    ChangeState(CylinderState.Retracted);
+                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoRetractedDone, _toRetractElapsedTime); //缩回到位 (耗时 {ToRetractElapsedTime} ms
                 }
                 break;
 
             case CylinderState.Extended:
                 // 动作保持 (尤其是单电控气缸需要持续给电，双电控也建议保持)
                 _cfg.Actuate(CylinderCmd.Extend);
-
-                // 伸出条件丢失
-                if (!_cfg.CanExtend())
+                // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
+                if (!_isExtended)
                 {
-                    //_cylinderCfg.Actuate(CylinderCmd.ToSafe);
-                    TransitionToError(CylinderError.ExtendConditionsNotMet, CylinderEvents.ErrExtendKeepInterlockLost);//伸出状态保持中外部联锁条件丢失
-                }
-                // 持续监控：位置保持，如果信号丢失，重新以此目标触发动作
-                else if (!isExtended)
-                {
-                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoExtSensorLost); //伸出位信号丢失，尝试重新检测
-                    _state = CylinderState.ToExtendBusy;
+                    _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoExtSensorLost);
+                    ChangeState(CylinderState.ToExtendBusy);
                     _toExtendStartTimestampMs = _currentTimestampMs;
                 }
                 break;
@@ -126,18 +127,11 @@ public class CM_Cylinder : IControlModule
             case CylinderState.Retracted:
                 // 动作保持
                 _cfg.Actuate(CylinderCmd.Retract);
-
-                // 缩回条件丢失
-                if (!_cfg.CanRetract())
-                {
-                    //_cylinderCfg.Actuate(CylinderCmd.ToSafe);
-                    TransitionToError(CylinderError.RetractConditionsNotMet, CylinderEvents.ErrRetractKeepInterlockLost);//缩回状态保持中外部联锁条件丢失
-                }
-                // 持续监控
-                else if (!isRetracted)
+                // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
+                if (!_isRetracted)
                 {
                     _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoRetSensorLost); //缩回位信号丢失，尝试重新检测
-                    _state = CylinderState.ToRetractBusy;
+                    ChangeState(CylinderState.ToRetractBusy);
                     _toRetractStartTimestampMs = _currentTimestampMs;
                 }
                 break;
@@ -150,7 +144,7 @@ public class CM_Cylinder : IControlModule
     {
         PurgeCommands();
         _cfg.Actuate(CylinderCmd.ToSafe);
-        _state = CylinderState.Unknown;
+        ChangeState(CylinderState.Unknown);
     }
     public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
@@ -160,90 +154,79 @@ public class CM_Cylinder : IControlModule
     // ==========================================
     public void MoveRetract()
     {
-        if (_state == CylinderState.Retracted || _state == CylinderState.ToRetractBusy)
+        if (State == CylinderState.Retracted || State == CylinderState.ToRetractBusy || State == CylinderState.Error)
             return;
-
-        if (_state == CylinderState.Error) return;
 
         if (!_cfg.CanRetract())
         {
-            TransitionToError(CylinderError.RetractConditionsNotMet, CylinderEvents.ErrRetractInterlock);
+            AlarmState.RetractConditionsNotMet = true;
+            RaiseAlarm(CylinderEvents.ErrRetractInterlock);
             return;
         }
 
         _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoCmdRetract);//收到缩回指令，开始执行...
-
-        _state = CylinderState.ToRetractBusy;
-
+        ChangeState(CylinderState.ToRetractBusy);
         _toRetractStartTimestampMs = _currentTimestampMs;
     }
     public void MoveExtend()
     {
-        if (_state == CylinderState.Extended || _state == CylinderState.ToExtendBusy)
+        if (State == CylinderState.Extended || State == CylinderState.ToExtendBusy || State == CylinderState.Error)
             return;
-
-        if (_state == CylinderState.Error) return;
 
         if (!_cfg.CanExtend())
         {
-            TransitionToError(CylinderError.ExtendConditionsNotMet, CylinderEvents.ErrExtendInterlock);//无法执行[伸出]：外部联锁条件不满足
+            AlarmState.ExtendConditionsNotMet = true;
+            RaiseAlarm(CylinderEvents.ErrExtendInterlock);
             return;
         }
 
         _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoCmdExtend);//收到伸出指令，开始执行
-        _state = CylinderState.ToExtendBusy;
-
+        ChangeState(CylinderState.ToExtendBusy);
         _toExtendStartTimestampMs = _currentTimestampMs;
     }
-    public long ToRetractElapsedTime { get; private set; }
-    public long ToExtendElapsedTime { get; private set; }
-    public int ExtendCount { get; private set; }
-    public int RetractCount { get; private set; }
-    public CylinderState State => _state;
-    public CylinderError ErrorId => _errorId;
-    public void ResetStatistics()
+    public CylinderState State { get; private set; } = CylinderState.Unknown;
+    public CylinderAlarmState AlarmState = new();
+    public CylinderSnapshot GetSnapshot() => new()
     {
-        ExtendCount = 0;
-        RetractCount = 0;
-        _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoClearStats); //动作次数累计清零
-    }
-    public string GetDiagnostics()
-    {
-        var sb = new StringBuilder();
-        sb.Append($"[{_cfg.Name}] State={_state}, Error={_errorId}, ");
-        sb.Append($"ExtSensor={_cfg.ReadExtendedSensor()}, ");
-        sb.Append($"RetSensor={_cfg.ReadRetractedSensor()}, ");
-        sb.Append($"CanExtend={_cfg.CanExtend()}, ");
-        sb.Append($"CanRetract={_cfg.CanRetract()}, ");
-        sb.Append($"ExtendET={ToExtendElapsedTime} ms, RetractET={ToRetractElapsedTime} ms, ");
-        sb.Append($"ExtendCnt={ExtendCount}, RetractCnt={RetractCount}");
-        return sb.ToString();
-    }
+        Name = _cfg.Name,
+        State = State,
+        AlarmState = AlarmState,
+        ExtSensor = _isExtended,
+        RetSensor = _isRetracted,
+        CanExtend = _cfg.CanExtend(),
+        CanRetract = _cfg.CanRetract(),
+        ExtendET = _toExtendElapsedTime,
+        RetractET = _toRetractElapsedTime,
+        ExtendCnt = _extendCount,
+        RetractCnt = _retractCount
+    };
 
 
     // ==========================================
     // 私有成员
     // ==========================================
     private readonly ILogger<CM_Cylinder> _logger;
-    private readonly ConcurrentDictionary<Guid, (EventBase eventBase, object[] args)> _activeAlarms = new();
-    private long _toExtendStartTimestampMs, _toRetractStartTimestampMs, _currentTimestampMs;
+    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
+    private long _toExtendStartTimestampMs, _toRetractStartTimestampMs, _currentTimestampMs, _toRetractElapsedTime, _toExtendElapsedTime;
     private readonly CylinderCfg _cfg;
     private readonly IEventProducer _eventProducer;
-    private CylinderState _state = CylinderState.Unknown;
-    private CylinderError _errorId = CylinderError.None;
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
     private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
-    private void TransitionToError(CylinderError err, EventBase eventbase, params object[] args)
+    private DigitalDebouncer _extSensorFilter, _retSensorFilter;
+    private int _extendCount, _retractCount;
+    private bool _isExtended, _isRetracted, _rawExt, _rawRet, _physicalExt, _physicalRet;
+    private void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (_state == CylinderState.Error) return;
+        if (!_activeAlarms.ContainsKey(eventbase.EventId))
+        {
+            var guid = Guid.NewGuid();
+            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
+            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
+        }
 
-        _state = CylinderState.Error;
-        _errorId = err;
-        var guid = Guid.NewGuid();
-        _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        _activeAlarms.TryAdd(guid, (eventbase, args));
+        if (eventbase.Severity == SeverityLevel.Error)
+            ChangeState(CylinderState.Error);
 
-        _cfg.ErrorHandler?.Invoke(err);
     }
     private void ProcessCommandQueue()
     {
@@ -284,17 +267,39 @@ public class CM_Cylinder : IControlModule
     }
     private void Reset()
     {
-        if (_state != CylinderState.Error) return;
+        if (State != CylinderState.Error) return;
 
-        _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoReset);
+        if (!AlarmState.RetractConditionsNotMet)
+        {
+            TryClearAlarm(CylinderEvents.ErrRetractInterlock);
+            TryClearAlarm(CylinderEvents.ErrRetractInterlockLost);
+            TryClearAlarm(CylinderEvents.ErrRetractKeepInterlockLost);
+        }
 
-        _errorId = CylinderError.None;
-        _state = CylinderState.Unknown;
+        if (!AlarmState.ExtendConditionsNotMet)
+        {
+            TryClearAlarm(CylinderEvents.ErrExtendInterlock);
+            TryClearAlarm(CylinderEvents.ErrExtendInterlockLost);
+            TryClearAlarm(CylinderEvents.ErrExtendKeepInterlockLost);
+        }
 
-        foreach (var alarm in _activeAlarms)
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.Key, alarm.Value.eventBase, alarm.Value.args);
+        if (!AlarmState.SensorConflict)
+        {
+            TryClearAlarm(CylinderEvents.ErrSensorConflict);
+        }
 
-        _activeAlarms.Clear();
+        // 无条件清除超时标志与报警，给系统重新尝试动作的机会。
+        AlarmState.ExtendTimeout = false;
+        TryClearAlarm(CylinderEvents.ErrExtendTimeout);
+
+        AlarmState.RetractTimeout = false;
+        TryClearAlarm(CylinderEvents.ErrRetractTimeout);
+
+        if (!AlarmState.HasAnyError)
+        {
+            ChangeState(CylinderState.Unknown);
+            _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoReset);
+        }
     }
     private void RegisterCommandHandlers()
     {
@@ -323,28 +328,160 @@ public class CM_Cylinder : IControlModule
         };
 
     }
+    private void TryClearAlarm(EventBase eventbase)
+    {
+        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
+        {
+            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
+        }
+    }
+    private void EvaluateAlarms(bool isExtended, bool isRetracted)
+    {
+        //寿命检测
+        if (_extendCount > _cfg.LifetimeSP)
+        {
+            AlarmState.LifeTimeReached = true;
+            RaiseAlarm(CylinderEvents.WarningLifetimeReached, _extendCount, _cfg.LifetimeSP);
+        }
+        else
+        {
+            AlarmState.LifeTimeReached = false;
+            TryClearAlarm(CylinderEvents.WarningLifetimeReached);
+        }
+
+        // 传感器冲突检查
+        if (isExtended && isRetracted)
+        {
+            AlarmState.SensorConflict = true;
+            RaiseAlarm(CylinderEvents.ErrSensorConflict);
+        }
+        else
+        {
+            AlarmState.SensorConflict = false;
+        }
+
+        // 伸出联锁检查
+        if (!_cfg.CanExtend())
+        {
+            if (State == CylinderState.ToExtendBusy)
+            {
+                AlarmState.ExtendConditionsNotMet = true;
+                RaiseAlarm(CylinderEvents.ErrExtendInterlockLost);
+            }
+            else if (State == CylinderState.Extended)
+            {
+                AlarmState.ExtendConditionsNotMet = true;
+                RaiseAlarm(CylinderEvents.ErrExtendKeepInterlockLost);
+            }
+        }
+        else
+        {
+            AlarmState.ExtendConditionsNotMet = false;
+        }
+
+        // 缩回联锁检查
+        if (!_cfg.CanRetract())
+        {
+            if (State == CylinderState.ToRetractBusy)
+            {
+                AlarmState.RetractConditionsNotMet = true;
+                RaiseAlarm(CylinderEvents.ErrRetractInterlockLost);
+            }
+            else if (State == CylinderState.Retracted)
+            {
+                AlarmState.RetractConditionsNotMet = true;
+                RaiseAlarm(CylinderEvents.ErrRetractKeepInterlockLost);
+            }
+        }
+        else
+        {
+            AlarmState.RetractConditionsNotMet = false;
+        }
+
+        // 超时检查
+        if (State == CylinderState.ToExtendBusy)
+        {
+            if (_toExtendElapsedTime > _cfg.ToExtendToutMs)
+            {
+                AlarmState.ExtendTimeout = true;
+                RaiseAlarm(CylinderEvents.ErrExtendTimeout, _cfg.ToExtendToutMs);
+            }
+        }
+        else if (isExtended || State == CylinderState.ToRetractBusy || State == CylinderState.Unknown)
+        {
+            AlarmState.ExtendTimeout = false; // 物理条件恢复或目标改变
+        }
+
+        if (State == CylinderState.ToRetractBusy)
+        {
+            if (_toRetractElapsedTime > _cfg.ToRetractToutMs)
+            {
+                AlarmState.RetractTimeout = true;
+                RaiseAlarm(CylinderEvents.ErrRetractTimeout, _cfg.ToRetractToutMs);
+            }
+        }
+        else if (isRetracted || State == CylinderState.ToExtendBusy || State == CylinderState.Unknown)
+        {
+            AlarmState.RetractTimeout = false;
+        }
+    }
+    private void ChangeState(CylinderState newState)
+    {
+        if (State == newState) return;
+        State = newState;
+    }
+    private void ResetStatistics()
+    {
+        _extendCount = 0;
+        _retractCount = 0;
+        _eventProducer.SendInfo(_cfg.Name, CylinderEvents.InfoClearStats); //动作次数累计清零
+    }
+}
+
+// 气缸的传感器配置类型
+public enum CylinderSensorConfig
+{
+    DualSensors, // 标配：双传感器
+    ExtendOnly,  // 只有伸出位传感器 (缩回靠信号消失+时间推算)
+    RetractOnly, // 只有缩回位传感器 (伸出靠信号消失+时间推算)
+    TimeBased    // 无传感器 (纯靠双向时间推算)
 }
 
 public class CylinderCfg
 {
     public required string Name { get; init; }
-    public int ToExtendTout { get; init; } = 10000; // unit:ms
-    public int ToRetractTout { get; init; } = 10000; // unit:ms
+
+    // 硬件形态配置
+    public CylinderSensorConfig SensorConfig { get; init; } = CylinderSensorConfig.DualSensors;
+
+    // 虚拟行程推算时间 (当没有对应传感器时，指令下发后多久认为到位)
+    public int VirtualExtendDelayMs { get; init; } = 2000;
+    public int VirtualRetractDelayMs { get; init; } = 2000;
+
+    public int ToExtendToutMs { get; init; } = 10000;
+    public int ToRetractToutMs { get; init; } = 10000;
+    public int LifetimeSP { get; init; } = 1000000;
+    public int SensorDebounceTimeMs { get; init; } = 50;
+
     public required Action<CylinderCmd> Actuate { get; init; }
-    public required Func<bool> ReadExtendedSensor { get; init; }
-    public required Func<bool> ReadRetractedSensor { get; init; }
     public required Func<bool> CanExtend { get; init; }
     public required Func<bool> CanRetract { get; init; }
-    public Action<CylinderError>? ErrorHandler { get; init; }
+
+    public Func<bool>? ReadExtendedSensor { get; init; }
+    public Func<bool>? ReadRetractedSensor { get; init; }
 
     public bool Validate()
     {
-        return !string.IsNullOrEmpty(Name) &&
-               Actuate != null &&
-               ReadExtendedSensor != null &&
-               ReadRetractedSensor != null &&
-               CanExtend != null &&
-               CanRetract != null;
+        bool valid = !string.IsNullOrEmpty(Name) && Actuate != null && CanExtend != null && CanRetract != null;
+
+        // 校验传感器配置是否与委托匹配
+        if (SensorConfig is CylinderSensorConfig.DualSensors or CylinderSensorConfig.ExtendOnly)
+            valid &= ReadExtendedSensor != null;
+
+        if (SensorConfig is CylinderSensorConfig.DualSensors or CylinderSensorConfig.RetractOnly)
+            valid &= ReadRetractedSensor != null;
+
+        return valid;
     }
 }
 
@@ -365,119 +502,184 @@ public enum CylinderState
     Error // 故障
 }
 
-public enum CylinderError : int
+public sealed class CylinderAlarmState
 {
-    None = 1000,
-    ExtendConditionsNotMet, // 伸出条件不满足
-    RetractConditionsNotMet, // 缩回条件不满足
-    ExtendTimeout, // 伸出超时
-    RetractTimeout, // 缩回超时
-    SensorConflict // 信号冲突
+    public bool LifeTimeReached { get; internal set; }
+    public bool HasAnyWarning => LifeTimeReached;
+    public bool ExtendConditionsNotMet { get; internal set; }
+    public bool RetractConditionsNotMet { get; internal set; }
+    public bool ExtendTimeout { get; internal set; }
+    public bool RetractTimeout { get; internal set; }
+    public bool SensorConflict { get; internal set; }
+    public bool HasAnyError => ExtendConditionsNotMet || RetractConditionsNotMet || ExtendTimeout || RetractTimeout || SensorConflict;
+    public override string ToString() => $"ExtendConditionsNotMet={ExtendConditionsNotMet}, RetractConditionsNotMet={RetractConditionsNotMet}, ExtendTimeout={ExtendTimeout}, RetractTimeout={RetractTimeout}, SensorConflict={SensorConflict}";
 }
 
 public static class CylinderEvents
 {
     public static readonly EventBase InfoClearStats = new()
     {
-        EventId = 1,
+        EventId = 100,
         Severity = SeverityLevel.Info,
         MessageTemplate = "动作次数累计清零"
     };
     public static readonly EventBase InfoCmdRetract = new()
     {
-        EventId = 2,
+        EventId = 101,
         Severity = SeverityLevel.Info,
         MessageTemplate = "指令:开始缩回"
     };
     public static readonly EventBase InfoCmdExtend = new()
     {
-        EventId = 3,
+        EventId = 102,
         Severity = SeverityLevel.Info,
         MessageTemplate = "指令:开始伸出"
     };
     public static readonly EventBase InfoReset = new()
     {
-        EventId = 4,
+        EventId = 103,
         Severity = SeverityLevel.Info,
         MessageTemplate = "故障复位"
     };
     public static readonly EventBase InfoExtendedDone = new()
     {
-        EventId = 5,
+        EventId = 104,
         Severity = SeverityLevel.Info,
         MessageTemplate = "伸出到位 (耗时 {0} ms)"
     };
     public static readonly EventBase InfoRetractedDone = new()
     {
-        EventId = 6,
+        EventId = 105,
         Severity = SeverityLevel.Info,
         MessageTemplate = "缩回到位 (耗时 {0} ms)"
     };
     public static readonly EventBase InfoExtSensorLost = new()
     {
-        EventId = 7,
+        EventId = 106,
         Severity = SeverityLevel.Info,
         MessageTemplate = "伸出位信号丢失，尝试维持"
     };
     public static readonly EventBase InfoRetSensorLost = new()
     {
-        EventId = 8,
+        EventId = 107,
         Severity = SeverityLevel.Info,
         MessageTemplate = "缩回位信号丢失，尝试维持"
     };
 
     public static readonly EventBase ErrRetractInterlock = new()
     {
-        EventId = 9,
+        EventId = 120,
         Severity = SeverityLevel.Error,
         MessageTemplate = "无法缩回：外部联锁不满足"
     };
     public static readonly EventBase ErrExtendInterlock = new()
     {
-        EventId = 10,
+        EventId = 121,
         Severity = SeverityLevel.Error,
         MessageTemplate = "无法伸出：外部联锁不满足"
     };
     public static readonly EventBase ErrSensorConflict = new()
     {
-        EventId = 11,
+        EventId = 122,
         Severity = SeverityLevel.Error,
         MessageTemplate = "传感器异常：原位和动位传感器同时亮"
     };
     public static readonly EventBase ErrExtendInterlockLost = new()
     {
-        EventId = 12,
+        EventId = 123,
         Severity = SeverityLevel.Error,
         MessageTemplate = "伸出动作中联锁丢失"
     };
     public static readonly EventBase ErrExtendTimeout = new()
     {
-        EventId = 13,
+        EventId = 124,
         Severity = SeverityLevel.Error,
         MessageTemplate = "伸出动作超时 (> {0} ms)"
     };
     public static readonly EventBase ErrRetractInterlockLost = new()
     {
-        EventId = 14,
+        EventId = 125,
         Severity = SeverityLevel.Error,
         MessageTemplate = "缩回动作中联锁丢失"
     };
     public static readonly EventBase ErrRetractTimeout = new()
     {
-        EventId = 15,
+        EventId = 126,
         Severity = SeverityLevel.Error,
         MessageTemplate = "缩回动作超时 (> {0} ms)"
     };
     public static readonly EventBase ErrExtendKeepInterlockLost = new()
     {
-        EventId = 16,
+        EventId = 127,
         Severity = SeverityLevel.Error,
         MessageTemplate = "伸出保持中联锁丢失"
     };
-    public static readonly EventBase ErrRetractKeepInterlockLost = new()
+    public static readonly EventBase ErrRetractKeepInterlockLost = new() { EventId = 128, Severity = SeverityLevel.Error, MessageTemplate = "缩回保持中联锁丢失" };
+    public static readonly EventBase WarningLifetimeReached = new() { EventId = 140, Severity = SeverityLevel.Warning, MessageTemplate = "寿命到达 (PV:{0} , SP:{1})" };
+}
+
+public struct DigitalDebouncer
+{
+    private bool _output;
+    private bool _lastRawState;
+    private long _stateChangeTimestamp;
+    private readonly long _debounceTimeMs;
+
+    public DigitalDebouncer(long debounceTimeMs = 50)
     {
-        EventId = 17,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "缩回保持中联锁丢失"
-    };
+        _debounceTimeMs = debounceTimeMs;
+        _output = false;
+        _lastRawState = false;
+        _stateChangeTimestamp = 0;
+    }
+
+    // 核心滤波逻辑
+    public bool Filter(bool rawSignal, long currentTimestampMs)
+    {
+        // 如果原始信号发生了翻转，记录当前的时间戳
+        if (rawSignal != _lastRawState)
+        {
+            _stateChangeTimestamp = currentTimestampMs;
+            _lastRawState = rawSignal;
+        }
+
+        // 如果原始信号和确认输出不一致，检查稳定时间是否达标
+        if (rawSignal != _output)
+        {
+            if (currentTimestampMs - _stateChangeTimestamp >= _debounceTimeMs)
+            {
+                // 稳定时间足够，确认状态翻转
+                _output = rawSignal;
+            }
+        }
+
+        return _output;
+    }
+}
+
+public sealed class CylinderSnapshot
+{
+    public required string Name { get; init; }
+    public required CylinderState State { get; init; }
+    public required CylinderAlarmState AlarmState { get; init; } = new();
+    public required bool ExtSensor { get; init; }
+    public required bool RetSensor { get; init; }
+    public required bool CanExtend { get; init; }
+    public required bool CanRetract { get; init; }
+    public required long ExtendET { get; init; }
+    public required long RetractET { get; init; }
+    public required int ExtendCnt { get; init; }
+    public required int RetractCnt { get; init; }
+}
+
+public interface ICylinderFactory
+{
+    CM_Cylinder Create(CylinderCfg cfg);
+}
+
+public class CylinderFactory : ICylinderFactory
+{
+    private readonly IServiceProvider _sp;
+    public CylinderFactory(IServiceProvider sp) => _sp = sp;
+    public CM_Cylinder Create(CylinderCfg cfg) => ActivatorUtilities.CreateInstance<CM_Cylinder>(_sp, cfg);
 }

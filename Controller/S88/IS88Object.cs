@@ -10,6 +10,8 @@ namespace Controller.S88;
 public interface IS88Object : IControllable
 {
     string Name { get; } // 名称 (e.g., "UNIT01/EM02/V01")
+    bool HasAnyError { get; }
+    bool HasAnyWarning { get; }
     void ToSafe(); // 去安全位
     void Refresh(long currentTimestampMs); // 周期性逻辑 (Scan)
 }

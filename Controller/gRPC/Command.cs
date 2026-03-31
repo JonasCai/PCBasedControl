@@ -10,6 +10,8 @@ public enum Command
 {
     Abort,
     Clear,
+    ChangeManualOutput,
+    ChangeSP,
     Complete,
     DownloadRecipe,
     EStop,
@@ -19,10 +21,16 @@ public enum Command
     Reset,
     ResetStatistics,
     Retract,
+    SetFlow,
     SetMode,
+    SetPID,
     Start,
     Stop,
+    StopAutoTune,
     Suspend,
+    SwitchToAutoTune,
+    SwitchToManual,
+    SwitchToNormalPid,
     Unhold,
     Unsuspend
 }
