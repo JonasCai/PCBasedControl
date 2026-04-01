@@ -10,6 +10,7 @@ public enum Command
 {
     Abort,
     Clear,
+    Close,
     ChangeManualOutput,
     ChangeSP,
     Complete,
@@ -18,6 +19,7 @@ public enum Command
     Extend,
     Hold,
     NextStep,
+    Open,
     Reset,
     ResetStatistics,
     Retract,

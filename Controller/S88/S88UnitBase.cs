@@ -15,6 +15,8 @@ public abstract class S88UnitBase(UnitCfg cfg, IEventProducer eventProducer, ILo
     // IUnit 接口方法
     // ==========================================
     public bool IsActive { get; private set; } = true;
+    public virtual bool HasAnyWarning => false;
+    public virtual bool HasAnyError => false;
     public string Name => _cfg.Name;
     public void Refresh(long currentTimestampMs) //周期刷新(Cycle Logic)
     {

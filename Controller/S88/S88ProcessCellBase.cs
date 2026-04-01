@@ -16,6 +16,8 @@ public abstract class S88ProcessCellBase(ProcessCellCfg cfg, EventLoggerService 
     // IProcessCell 接口方法
     // ==========================================
     public string Name { get; } = cfg.Name;
+    public bool HasAnyWarning => false;
+    public bool HasAnyError => false;
     public void ExecuteCommand(InternalCommand command)
     {
         if (string.IsNullOrEmpty(command.TargetUnit))

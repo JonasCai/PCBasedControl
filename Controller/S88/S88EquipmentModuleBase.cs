@@ -1,3 +1,5 @@
+using Controller._01.ControlModule;
+using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
 using System.Collections.Concurrent;
@@ -11,6 +13,8 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     // IEquipmentModule 接口方法
     // ==========================================
     public string Name => _cfg.Name;
+    public bool HasAnyWarning => false;
+    public bool HasAnyError => false;
     public EMState State { get; private set; } = EMState.Idle;
     public void ExecuteCommand(InternalCommand command)
     {

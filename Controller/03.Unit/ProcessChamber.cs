@@ -5,12 +5,7 @@ using Controller.gRPC;
 using Controller.Hardware;
 using Controller.Recipe;
 using Controller.S88;
-using MongoDB.Driver;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+
 
 namespace Controller._03.Unit;
 
@@ -168,7 +163,7 @@ public class ProcessChamber : S88UnitBase
             },
 
             ReadOpenSensor = (diNode != null && openSensorIndex >= 0) ? () => diNode[openSensorIndex] : null,
-            ReadCloseSensor = (diNode != null && closeSensorIndex >= 0) ? () => diNode[closeSensorIndex] : null,
+            ReadClosedSensor = (diNode != null && closeSensorIndex >= 0) ? () => diNode[closeSensorIndex] : null,
             CanOpen = canOpen ?? (() => true),
             CanClose = canClose ?? (() => true)
         };
@@ -218,7 +213,7 @@ public class ProcessChamber : S88UnitBase
             },
 
             ReadOpenSensor = (diNode != null && openSensorIndex >= 0) ? () => diNode[openSensorIndex] : null,
-            ReadCloseSensor = (diNode != null && closeSensorIndex >= 0) ? () => diNode[closeSensorIndex] : null,
+            ReadClosedSensor = (diNode != null && closeSensorIndex >= 0) ? () => diNode[closeSensorIndex] : null,
             CanOpen = canOpen ?? (() => true),
             CanClose = canClose ?? (() => true),
         };
