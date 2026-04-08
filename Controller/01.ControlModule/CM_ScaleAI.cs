@@ -1,3 +1,4 @@
+using Controller.Common;
 using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
@@ -10,19 +11,23 @@ namespace Controller._01.ControlModule;
 
 public class CM_ScaleAI : IControlModule
 {
-    public CM_ScaleAI(IEventProducer eventProducer, ScaleAICfg cfg, ILogger<CM_ScaleAI> logger)
+    public CM_ScaleAI(IEventProducer eventProducer, ScaleAICfg cfg, IRetainDataService retainDataService , ILogger<CM_ScaleAI> logger)
     {
         _eventProducer = eventProducer;
         _cfg = cfg;
         _logger = logger;
+        _retainDataService = retainDataService;
 
         RegisterCommandHandlers();
+
+        _highHighLimit = _retainDataService.GetValue($"{Name}.HH", _cfg.ScaledMax);
+        _highLimit = _retainDataService.GetValue($"{Name}.H", _cfg.ScaledMax);
+        _lowLimit = _retainDataService.GetValue($"{Name}.L", _cfg.ScaledMin);
+        _lowLowLimit = _retainDataService.GetValue($"{Name}.LL", _cfg.ScaledMin);
 
         if (!_cfg.Validate())
             throw new ArgumentException($"CM_ScaleAI[{_cfg.Name}]配置不完整", nameof(_cfg));
 
-        // 初始状态设定
-        State = _cfg.AutoEnableAlarmsOnStartup ? ScaleAIState.Active : ScaleAIState.Disabled;
     }
 
     // ==========================================
@@ -45,7 +50,7 @@ public class CM_ScaleAI : IControlModule
         }
         else
         {
-            // 先滤波，再缩放 (滤波滤的是电信号的毛刺)
+            // 先滤波，再缩放
             _filteredRawVal = _filter.Filter(_rawVal, _cfg.FilterAlpha);
             _scaledVal = CalculateScale(_filteredRawVal);
         }
@@ -108,13 +113,29 @@ public class CM_ScaleAI : IControlModule
     }
     public void UpdateLimits(float? hh = null, float? h = null, float? l = null, float? ll = null)
     {
-        if (hh.HasValue) _cfg.HighHighLimit = hh.Value;
-        if (h.HasValue) _cfg.HighLimit = h.Value;
-        if (l.HasValue) _cfg.LowLimit = l.Value;
-        if (ll.HasValue) _cfg.LowLowLimit = ll.Value;
+        if (hh.HasValue)
+        {
+            _highHighLimit = hh.Value;
+            _retainDataService.SetValue($"{Name}.HH", hh.Value);
+        }
+        if (h.HasValue)
+        {
+            _highLimit = h.Value;
+            _retainDataService.SetValue($"{Name}.H", h.Value);
+        }
+        if (l.HasValue)
+        {
+            _lowLimit = l.Value;
+            _retainDataService.SetValue($"{Name}.L", l.Value);
+        }
+        if (ll.HasValue)
+        {
+            _lowLowLimit = ll.Value;
+            _retainDataService.SetValue($"{Name}.LL", ll.Value);
+        }
 
         _eventProducer.SendInfo(_cfg.Name, ScaleAIEvents.InfoLimitsUpdated,
-            _cfg.HighHighLimit, _cfg.HighLimit, _cfg.LowLimit, _cfg.LowLowLimit);
+            _highHighLimit, _highLimit, _lowLimit, _lowLowLimit);
     }
     public ScaleAISnapshot GetSnapshot() => new()
     {
@@ -124,10 +145,10 @@ public class CM_ScaleAI : IControlModule
         RawValue = _rawVal,
         ScaledValue = _scaledVal,
         Unit = _cfg.EngineeringUnit,
-        HH_Limit = _cfg.HighHighLimit,
-        H_Limit = _cfg.HighLimit,
-        L_Limit = _cfg.LowLimit,
-        LL_Limit = _cfg.LowLowLimit
+        HH_Limit = _highHighLimit,
+        H_Limit = _highLimit,
+        L_Limit = _lowLimit,
+        LL_Limit = _lowLowLimit
     };
 
     // ==========================================
@@ -140,8 +161,10 @@ public class CM_ScaleAI : IControlModule
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
     private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private readonly LowPassFilter _filter = new();
+    private readonly IRetainDataService _retainDataService;
     private long _currentTimestampMs;
     private float _rawVal, _filteredRawVal, _scaledVal;
+    private float _highHighLimit, _highLimit, _lowLowLimit, _lowLimit;
     private void ChangeState(ScaleAIState newState)
     {
         if (State == newState) return;
@@ -176,38 +199,38 @@ public class CM_ScaleAI : IControlModule
         if (State == ScaleAIState.Disabled) return;
 
         // 上上限 Error (HH)
-        if (_scaledVal >= _cfg.HighHighLimit)
+        if (_scaledVal >= _highHighLimit)
         {
             AlarmState.HighHighError = true;
-            RaiseAlarm(ScaleAIEvents.ErrHighHigh, _scaledVal, _cfg.HighHighLimit, _cfg.EngineeringUnit);
+            RaiseAlarm(ScaleAIEvents.ErrHighHigh, _scaledVal, _highHighLimit, _cfg.EngineeringUnit);
         }
         // 加入死区(Deadband)判断，防止数值在阈值边缘疯狂跳动
-        else if (_scaledVal <= _cfg.HighHighLimit - _cfg.AlarmDeadband)
+        else if (_scaledVal <= _highHighLimit - _cfg.AlarmDeadband)
         {
             AlarmState.HighHighError = false; // 物理条件恢复
         }
 
         // 下下限 Error (LL)
-        if (_scaledVal <= _cfg.LowLowLimit)
+        if (_scaledVal <= _lowLowLimit)
         {
             AlarmState.LowLowError = true;
-            RaiseAlarm(ScaleAIEvents.ErrLowLow, _scaledVal, _cfg.LowLowLimit, _cfg.EngineeringUnit);
+            RaiseAlarm(ScaleAIEvents.ErrLowLow, _scaledVal, _lowLowLimit, _cfg.EngineeringUnit);
         }
-        else if (_scaledVal >= _cfg.LowLowLimit + _cfg.AlarmDeadband)
+        else if (_scaledVal >= _lowLowLimit + _cfg.AlarmDeadband)
         {
             AlarmState.LowLowError = false;
         }
 
         // 上限 Warning (H) 
-        if (_scaledVal >= _cfg.HighLimit && _scaledVal < _cfg.HighHighLimit)
+        if (_scaledVal >= _highLimit && _scaledVal < _highHighLimit)
         {
             if (!AlarmState.HighWarning)
             {
                 AlarmState.HighWarning = true;
-                RaiseAlarm(ScaleAIEvents.WarningHigh, _scaledVal, _cfg.HighLimit, _cfg.EngineeringUnit);
+                RaiseAlarm(ScaleAIEvents.WarningHigh, _scaledVal, _highLimit, _cfg.EngineeringUnit);
             }
         }
-        else if (_scaledVal <= _cfg.HighLimit - _cfg.AlarmDeadband)
+        else if (_scaledVal <= _highLimit - _cfg.AlarmDeadband)
         {
             if (AlarmState.HighWarning)
             {
@@ -216,16 +239,16 @@ public class CM_ScaleAI : IControlModule
             }
         }
 
-        // 6. 下限 Warning (L)
-        if (_scaledVal <= _cfg.LowLimit && _scaledVal > _cfg.LowLowLimit)
+        // 下限 Warning (L)
+        if (_scaledVal <= _lowLimit && _scaledVal > _lowLowLimit)
         {
             if (!AlarmState.LowWarning)
             {
                 AlarmState.LowWarning = true;
-                RaiseAlarm(ScaleAIEvents.WarningLow, _scaledVal, _cfg.LowLimit, _cfg.EngineeringUnit);
+                RaiseAlarm(ScaleAIEvents.WarningLow, _scaledVal, _lowLimit, _cfg.EngineeringUnit);
             }
         }
-        else if (_scaledVal >= _cfg.LowLimit + _cfg.AlarmDeadband)
+        else if (_scaledVal >= _lowLimit + _cfg.AlarmDeadband)
         {
             if (AlarmState.LowWarning)
             {
@@ -331,20 +354,11 @@ public class ScaleAICfg
     public float ScaledMin { get; init; } = 0f;
     public float ScaledMax { get; init; } = 100f;
 
-    // 报警参数 (Limits)
-    public float HighHighLimit { get; set; } = 95f;
-    public float HighLimit { get; set; } = 90f;
-    public float LowLimit { get; set; } = 10f;
-    public float LowLowLimit { get; set; } = 5f;
-
     // 报警死区/滞环，防止数值临界跳动引发报警洪泛
     public float AlarmDeadband { get; init; } = 1.0f;
 
     // 滤波系数 (0~1)
     public float FilterAlpha { get; init; } = 0.2f;
-
-    // 启动时是否默认开启超限监控
-    public bool AutoEnableAlarmsOnStartup { get; init; } = true;
 
     // 数据读取委托
     public required Func<float> ReadRawValue { get; init; }

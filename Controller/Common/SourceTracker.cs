@@ -1,6 +1,6 @@
 using System;
 
-namespace Controller._01.ControlModule;
+namespace Controller.Common;
 
 /// <summary>
 /// 轻量级源耗量追踪器（基于流量积分法）
@@ -62,7 +62,7 @@ public class SourceTracker
         if (dtMs > 0 && currentFlow > _cfg.FlowDeadband)
         {
             // 积分: 消耗量 = 流量(单位/分钟) / 60000(毫秒) * 经过的毫秒数 * 转换系数
-            double consumedThisTick = (currentFlow / 60000.0) * dtMs * _cfg.IntegrationConversionFactor;
+            double consumedThisTick = currentFlow / 60000.0 * dtMs * _cfg.IntegrationConversionFactor;
             RemainingAmount -= consumedThisTick;
 
             if (RemainingAmount < 0) RemainingAmount = 0; // 触底保护

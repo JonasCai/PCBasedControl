@@ -1,3 +1,4 @@
+using Controller.Common;
 using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
@@ -36,7 +37,8 @@ public class CM_TempController : IControlModule
         _currentTimestampMs = currentTimestampMs;
 
         // 读取传感器状态
-        _thisRawTemperature = _cfg.ReadTemperature();
+        _monitorTemperature = _cfg.ReadMonitorTemp != null ? _cfg.ReadMonitorTemp() : null;
+        _thisRawTemperature = _cfg.ReadControlTemp();
         _thisFilteredTemperature = _filter.Filter(_thisRawTemperature, _cfg.FilterAlpha);
 
         // 处理指令队列
@@ -210,6 +212,7 @@ public class CM_TempController : IControlModule
     private readonly TimeProportioningOutput _timeProportioning;
     private readonly LowPassFilter _filter = new();
     private float _lastPidOutputPercent, _thisFilteredTemperature, _thisPidOutputPercent, _thisRawTemperature, _thisError, _manualOutputPercent;
+    private float? _monitorTemperature;
     private long _currentTimestampMs;
     private bool _thisHeaterOn = false;
     private long? _lastPidComputeTimestamMs = null;
@@ -495,10 +498,10 @@ public class CM_TempController : IControlModule
     private void EvaluateAlarms()
     {
         // 极值报警
-        if (_thisRawTemperature > _cfg.AbsoluteMaxTempLimit || _thisRawTemperature > _cfg.AbsoluteMinTempLimit)
+        if (_thisRawTemperature > _cfg.AbsoluteMaxTempLimit || _thisRawTemperature < _cfg.AbsoluteMinTempLimit || (_monitorTemperature.HasValue && (_monitorTemperature > _cfg.AbsoluteMaxTempLimit || _monitorTemperature < _cfg.AbsoluteMinTempLimit)))
         {
             AlarmState.PVOverLimitError = true;
-            RaiseAlarm(TempControllerEvents.ErrPVOverLimit, _thisRawTemperature, _cfg.AbsoluteMinTempLimit, _cfg.AbsoluteMaxTempLimit);
+            RaiseAlarm(TempControllerEvents.ErrPVOverLimit, _thisRawTemperature, _monitorTemperature ?? float.NaN, _cfg.AbsoluteMinTempLimit, _cfg.AbsoluteMaxTempLimit);
         }
         else { AlarmState.PVOverLimitError = false; }
 
@@ -541,7 +544,8 @@ public class TempControllerCfg
 {
     public required string Name { get; init; }
     public required Func<bool> CanExecute { get; init; }
-    public required Func<float> ReadTemperature { get; init; }
+    public required Func<float> ReadControlTemp { get; init; }
+    public Func<float>? ReadMonitorTemp { get; init; }
     public Action<bool>? SetHeaterOn { get; init; }
     public Action<float>? SetDutyRatio { get; init; }
     public float PidTolerance { get; init; } = 1.0f;
@@ -560,7 +564,7 @@ public class TempControllerCfg
     public bool Validate()
     {
         return !string.IsNullOrEmpty(Name) &&
-               ReadTemperature != null &&
+               ReadControlTemp != null &&
                (SetHeaterOn != null ||
                SetDutyRatio != null);
     }
@@ -577,7 +581,7 @@ public static class TempControllerEvents
     public static readonly EventBase InfoAutoTuneSucceed = new() { EventId = 207, Severity = SeverityLevel.Info, MessageTemplate = "Pid参数自整定成功" };
     public static readonly EventBase InfoAutoTuneFailedOrCanceled = new() { EventId = 208, Severity = SeverityLevel.Info, MessageTemplate = "Pid参数自整定失败或者被取消 ({0})" };
 
-    public static readonly EventBase ErrPVOverLimit = new() { EventId = 220, Severity = SeverityLevel.Error, MessageTemplate = "当前温度超出最大限制 (PV：{0:F1} ,MinLimit: {1:F1}, MaxLimit: {2:F1})" };
+    public static readonly EventBase ErrPVOverLimit = new() { EventId = 220, Severity = SeverityLevel.Error, MessageTemplate = "当前温度超出最大限制 (ControlPV：{0:F1} ,MonitorlPV：{1:F1} ,MinLimit: {2:F1}, MaxLimit: {3:F1})" };
     public static readonly EventBase ErrHighHighDev = new() { EventId = 221, Severity = SeverityLevel.Error, MessageTemplate = "温度高高偏差错误 (PV: {0:F1} , SP: {1:F1})" };
     public static readonly EventBase ErrExecuteConditionsNotMet = new() { EventId = 222, Severity = SeverityLevel.Error, MessageTemplate = "安全联锁触发" };
 
@@ -643,30 +647,6 @@ public enum AutoTuneRule
 }
 public enum AutoTuneStatus { Idle, Running, Succeeded, Failed, Cancelled }
 internal enum PeakType { Unknown, Max, Min }
-#endregion
-
-#region Filter
-public sealed class LowPassFilter
-{
-    private bool _initialized;
-    private float _value;
-    public float LastValue => _value;
-    public bool IsInitialized => _initialized;
-    public void Reset() { _initialized = false; _value = 0; }
-    public float Filter(float input, float alpha)
-    {
-        if (alpha <= 0 || alpha > 1)
-            throw new ArgumentOutOfRangeException(nameof(alpha), "alpha 必须在 (0, 1] 范围内。");
-        if (!_initialized)
-        {
-            _value = input;
-            _initialized = true;
-            return _value;
-        }
-        _value = alpha * input + (1.0f - alpha) * _value;
-        return _value;
-    }
-}
 #endregion
 
 #region PID

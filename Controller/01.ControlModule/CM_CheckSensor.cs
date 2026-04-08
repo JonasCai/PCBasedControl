@@ -1,4 +1,5 @@
 using Controller._01.ControlModule;
+using Controller.Common;
 using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
@@ -274,37 +275,10 @@ public class CM_CheckSensor : IControlModule
 
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Stop] = cmd =>
-        {
-            DisableMonitoring();
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
-
         _commandHandlers[Command.Reset] = cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
-
-        // 扩展的动态设定期望状态指令 (参数1: 期望状态字符串, 参数2: 超时时间)
-        _commandHandlers[Command.Start] = cmd =>
-        {
-            if (cmd.Params.TryGetValue("Expected", out string expectedStr) &&
-                Enum.TryParse(expectedStr, out ExpectedSignalState expected))
-            {
-                long? timeout = null;
-                if (cmd.Params.TryGetValue("Timeout", out string timeoutStr) && long.TryParse(timeoutStr, out long t))
-                {
-                    timeout = t;
-                }
-
-                SetExpectedState(expected, timeout);
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "参数错误或缺少 Expected 参数"));
-            }
         };
     }
 }

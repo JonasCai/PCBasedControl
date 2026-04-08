@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace Controller._01.ControlModule;
+namespace Controller.Common;
 
 public class TonTimer
 {
