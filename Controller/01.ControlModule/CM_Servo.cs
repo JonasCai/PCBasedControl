@@ -1,10 +1,8 @@
-using Controller.EventLogger;
+ï»¿using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
+
 
 namespace Controller._01.ControlModule;
 
@@ -18,11 +16,11 @@ public class CM_Servo : IControlModule
         RegisterCommandHandlers();
 
         if (!_cfg.Validate())
-            throw new ArgumentException($"CM_Servo[{_cfg.Name}]ÅäÖÃ²»ÍêÕû", nameof(_cfg));
+            throw new ArgumentException($"CM_Servo[{_cfg.Name}]é…ç½®ä¸å®Œæ•´", nameof(_cfg));
     }
 
     // ==========================================
-    // IControlModule ½Ó¿Ú·½·¨
+    // IControlModule æ¥å£æ–¹æ³•
     // ==========================================
     public bool HasAnyWarning => AlarmState.HasAnyWarning;
     public bool HasAnyError => State == ServoState.Error;
@@ -32,77 +30,62 @@ public class CM_Servo : IControlModule
     {
         _currentTimestampMs = currentTimestampMs;
 
-        // 1. ¶ÁÈ¡µ×²ãÓ²¼ş×´Ì¬ (À×Èü DMC_check_done / DMC_get_position µÈ)
-        _actualPosition = _cfg.ReadActualPosition();
-        _actualVelocity = _cfg.ReadActualVelocity();
-        _isServoOn = _cfg.ReadServoStatus();
-        _isMotionDone = _cfg.CheckMotionDone(); // À×ÈüÖáÊÇ·ñÍ£Ö¹Âö³åÊä³ö
+        // è¯»å–ç¡¬ä»¶çŠ¶æ€
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
 
-        var ioStatus = _cfg.ReadAxisIoStatus(); // ¶ÁÈ¡ ALM, PEL, MEL µÈÓ²¼ş IO
-
-        // 2. ´¦ÀíÅÅ¶ÓµÄÍâ²¿Ö¸Áî
+        // å¤„ç†æ’é˜Ÿçš„å¤–éƒ¨æŒ‡ä»¤
         ProcessCommandQueue();
 
-        // 3. ÆÀ¹À±¨¾¯¼°Ó²/ÈíÏŞÎ»ÁªËø
-        EvaluateAlarms(ioStatus);
+        // è¯„ä¼°æŠ¥è­¦åŠç¡¬/è½¯é™ä½è”é” (æ­£è´Ÿè½¯é™ä½å·²åˆ†ç¦»)
+        EvaluateAlarms(_axisStatus);
 
-        // 4. ¹ÊÕÏÌ¬Á¢¼´ÇĞ¶ÏÔË¶¯£¬²¢Ìø¹ıºóĞø×´Ì¬»ú
+        // æ•…éšœæ€ç«‹å³åˆ‡æ–­è¿åŠ¨ï¼Œå¹¶è·³è¿‡åç»­çŠ¶æ€æœº
         if (State == ServoState.Error)
         {
-            // ×¢Òâ£º¸ù¾İ¹¤ÒÕĞèÇó£¬·¢Éú Error Ê±ÊÇ·ñÒªÏÂµô Enable(¶ÏËÅ·şµç) È¡¾öÓÚÅäÖÃ¡£
-            // µ«ÎŞÂÛÈçºÎ£¬±ØĞëÁ¢¿Ì·¢ËÍ¼±Í£Ö¸ÁîÍ£Ö¹·¢Âö³å£¡
             if (!_isStopCommandSent)
             {
-                _cfg.ActuateStop(true);
+                _cfg.ActuateStop(_cfg.AxisId, true);
                 _isStopCommandSent = true;
             }
             return;
         }
 
-        // 5. ºËĞÄ×´Ì¬»úÂß¼­
+        // æ ¸å¿ƒçŠ¶æ€æœºé€»è¾‘
         switch (State)
         {
             case ServoState.Disabled:
-                if (_isServoOn) ChangeState(ServoState.Standby);
+                if (_axisStatus.ServoOn) ChangeState(ServoState.Standby);
                 break;
 
             case ServoState.Standby:
-                if (!_isServoOn) ChangeState(ServoState.Disabled);
+                if (!_axisStatus.ServoOn) ChangeState(ServoState.Disabled);
                 break;
 
             case ServoState.Homing:
-                if (_isMotionDone)
+                if (!_axisStatus.Moving)
                 {
-                    // À×Èü»ØÁãÍê³ÉµÄ±êÖ¾
                     ChangeState(ServoState.Standby);
+                    _isStopCommandSent = false;
                     _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomeDone);
                 }
                 break;
 
             case ServoState.MovingAbs:
             case ServoState.MovingRel:
-                if (_isMotionDone)
+                if (!_axisStatus.Moving)
                 {
-                    // µ½Î»ºó£¬¸ù¾İÊÇ·ñÅäÖÃÁË INP (In-Position) ĞÅºÅÀ´¾ö¶¨ÊÇ·ñ¾«×¼µ½Î»
-                    if (_cfg.RequireInpSignal && !ioStatus.INP)
-                    {
-                        // Âö³å·¢ÍêÁË£¬µ«µç»ú±àÂëÆ÷»¹Ã»×·ÉÏ£¬µÈ´ı...
-                        // (¿ÉÔÚ´Ë´¦À©Õ¹µ½Î»³¬Ê±±¨¾¯Âß¼­)
-                        break;
-                    }
                     ChangeState(ServoState.Standby);
-                    _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveDone, _actualPosition);
+                    _isStopCommandSent = false;
+                    _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveDone, _axisStatus.ActPos);
                 }
                 break;
 
-            case ServoState.Jogging:
             case ServoState.VelocityMode:
             case ServoState.TorqueMode:
-                // Á¬ĞøÔË¶¯Ä£Ê½ÏÂ£¬ÓÉÍâ²¿Ö÷¶¯·¢ Stop Ö¸ÁîÀ´½áÊø
-                // Èç¹ûµ×²ãµÄÇı¶¯Æ÷ÒòÎªÄ³ÖÖÔ­Òò×Ô¼ºÍ£ÁË£¨_isMotionDone == true£©£¬ËµÃ÷±»Ó²ÏŞÎ»½ØÍ£»ò·¢ÉúÒì³£
-                if (_isMotionDone && State != ServoState.TorqueMode)
+                if (_isStopCommandSent || (!_axisStatus.Moving && State != ServoState.TorqueMode))
                 {
                     ChangeState(ServoState.Standby);
+                    _isStopCommandSent = false;
                 }
                 break;
         }
@@ -112,28 +95,30 @@ public class CM_Servo : IControlModule
     {
         PurgeCommands();
         Stop(emergency: true);
-        // °²È«Ì¬ÏÂ£¬ÊÇ·ñĞèÒªÇĞ¶ÏËÅ·şÊ¹ÄÜ£¨_cfg.ActuateEnable(false)£©£¬¿É¸ù¾İÊµ¼Ê»úĞµÆÀ¹À
     }
 
     public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
-    // Íâ²¿ÔË¶¯¿ØÖÆ½Ó¿Ú
+    // å¤–éƒ¨è¿åŠ¨æ§åˆ¶æ¥å£
     // ==========================================
     public void EnableServo(bool enable)
     {
         if (State == ServoState.Error) return;
-        _cfg.ActuateEnable(enable);
+        _cfg.ActuateEnable(_cfg.AxisId, enable);
+        _eventProducer.SendInfo(_cfg.Name, enable ? ServoEvents.InfoServoEnabled : ServoEvents.InfoServoDisabled);
     }
 
     public void Stop(bool emergency = false)
     {
         if (State == ServoState.Error || State == ServoState.Disabled || State == ServoState.Standby) return;
 
-        _cfg.ActuateStop(emergency);
-        _isStopCommandSent = true; // ±ê¼ÇÒÑ·¢Í£Ö¹£¬·ÀÖ¹ÖØ¸´·¢
-
-        // ×´Ì¬»ú½«ÔÚÏÂÒ»Ö¡¼ì²âµ½ _isMotionDone Îª true ºóÇĞ»Ø Standby
+        if (!_isStopCommandSent)
+        {
+            _cfg.ActuateStop(_cfg.AxisId, emergency);
+            _isStopCommandSent = true;
+            _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoStopped, emergency);
+        }
     }
 
     public void Home()
@@ -141,79 +126,77 @@ public class CM_Servo : IControlModule
         if (!CheckBeforeMove()) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateHome();
+        _cfg.ActuateHome(_cfg.AxisId, _cfg.HomeMode);
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
         ChangeState(ServoState.Homing);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomingStarted);
     }
 
-    public void MoveAbs(double targetPos, double speed)
+    public void MoveAbs(float targetPos, float speed)
     {
         if (!CheckBeforeMove(targetPos)) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveAbs(targetPos, speed);
+        _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed);
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
         ChangeState(ServoState.MovingAbs);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveAbsStarted, targetPos, speed);
     }
 
-    public void MoveRel(double distance, double speed)
+    public void MoveRel(float distance, float speed)
     {
-        double expectedTarget = _actualPosition + distance;
+        double expectedTarget = _axisStatus.ActPos + distance;
         if (!CheckBeforeMove(expectedTarget)) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveRel(distance, speed);
+        _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed);
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
         ChangeState(ServoState.MovingRel);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveRelStarted, distance, speed);
     }
 
-    public void Jog(bool positiveDir, double speed)
+    public void MoveVelocity(float speed)
     {
         if (!CheckBeforeMove()) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateJog(positiveDir, speed);
-        ChangeState(ServoState.Jogging);
-    }
-
-    public void MoveVelocity(double speed)
-    {
-        if (!CheckBeforeMove()) return;
-
-        _isStopCommandSent = false;
-        _cfg.ActuateVelocity(speed);
+        _cfg.ActuateVelocity(_cfg.AxisId, speed);
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
         ChangeState(ServoState.VelocityMode);
+        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveVelStarted, speed);
     }
 
-    public void SetTorque(double torquePercent)
+    public void SetTorque(float torquePercent)
     {
-        if (State == ServoState.Error || !_isServoOn) return;
+        if (!CheckBeforeMove()) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateTorque(torquePercent);
+        _cfg.ActuateTorque(_cfg.AxisId, torquePercent);
+        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
         ChangeState(ServoState.TorqueMode);
+        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoTorqueStarted, torquePercent);
     }
 
     // ==========================================
-    // ×´Ì¬¶ÁÈ¡ÊôĞÔ
+    // çŠ¶æ€è¯»å–å±æ€§
     // ==========================================
     public ServoState State { get; private set; } = ServoState.Disabled;
     public ServoAlarmState AlarmState { get; } = new();
-    public double ActualPosition => _actualPosition;
-    public double ActualVelocity => _actualVelocity;
+    public double ActualPosition => _axisStatus.ActPos;
+    public double ActualVelocity => _axisStatus.ActVel;
 
     public ServoSnapshot GetSnapshot() => new()
     {
         Name = _cfg.Name,
         State = State,
         AlarmState = AlarmState,
-        ActualPosition = _actualPosition,
-        ActualVelocity = _actualVelocity,
-        IsServoOn = _isServoOn
+        ActualPosition = _axisStatus.ActPos,
+        ActualVelocity = _axisStatus.ActVel,
+        IsServoOn = _axisStatus.ServoOn
     };
 
     // ==========================================
-    // Ë½ÓĞ³ÉÔ±Óë±¨¾¯Âß¼­
+    // ç§æœ‰æˆå‘˜ä¸æŠ¥è­¦é€»è¾‘
     // ==========================================
     private readonly ILogger<CM_Servo> _logger;
     private readonly ServoCfg _cfg;
@@ -223,8 +206,7 @@ public class CM_Servo : IControlModule
     private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
 
     private long _currentTimestampMs;
-    private double _actualPosition, _actualVelocity;
-    private bool _isServoOn, _isMotionDone;
+    private AxisStatus _axisStatus;
     private bool _isStopCommandSent = false;
 
     private void ChangeState(ServoState newState)
@@ -237,8 +219,7 @@ public class CM_Servo : IControlModule
     {
         if (State == ServoState.Error) return false;
 
-        // Î´Ê¹ÄÜÊ±Ö±½ÓÅ×³öÖÂÃü´íÎó
-        if (!_isServoOn)
+        if (!_axisStatus.ServoOn)
         {
             AlarmState.MoveWhileDisabledError = true;
             RaiseAlarm(ServoEvents.ErrMoveWhileDisabled);
@@ -252,68 +233,71 @@ public class CM_Servo : IControlModule
             return false;
         }
 
-        // Èí¼şÏŞÎ»Ô¤²âÀ¹½Ø
         if (targetPos.HasValue)
         {
             if (targetPos.Value > _cfg.SoftLimitPositive || targetPos.Value < _cfg.SoftLimitNegative)
             {
-                AlarmState.SoftwareLimitError = true;
-                RaiseAlarm(ServoEvents.ErrSoftwareLimit, targetPos.Value);
+                AlarmState.TargetOutOfBoundsError = true;
+                RaiseAlarm(ServoEvents.ErrTargetOutOfBounds, targetPos.Value, _cfg.SoftLimitNegative, _cfg.SoftLimitPositive);
                 return false;
             }
         }
         return true;
     }
 
-    private void EvaluateAlarms(AxisIoStatus ioStatus)
+    private void EvaluateAlarms(AxisStatus status)
     {
-        // 1. ËÅ·şÇı¶¯Æ÷Ó²¼ş±¨¾¯ (ALM)
-        if (ioStatus.ALM)
+        // é©±åŠ¨å™¨æŠ¥è­¦ (ALM)
+        if (status.Alarm)
         {
             AlarmState.DriveAlarm = true;
             RaiseAlarm(ServoEvents.ErrDriveAlarm);
         }
-        else
-        {
-            AlarmState.DriveAlarm = false;
-        }
+        else AlarmState.DriveAlarm = false;
 
-        // 2. Ó²¼ş¼«ÏŞ±£»¤ (PEL / MEL)
-        if (ioStatus.PEL)
+        // ç¡¬ä»¶æé™ (PEL / MEL)
+        if (status.PosLimit_H)
         {
             AlarmState.HardwareLimitPositive = true;
-            RaiseAlarm(ServoEvents.ErrPEL);
+            RaiseAlarm(ServoEvents.ErrPosLimit);
         }
-        else
-        {
-            AlarmState.HardwareLimitPositive = false;
-        }
+        else AlarmState.HardwareLimitPositive = false;
 
-        if (ioStatus.MEL)
+        if (status.NegLimit_H)
         {
             AlarmState.HardwareLimitNegative = true;
-            RaiseAlarm(ServoEvents.ErrMEL);
+            RaiseAlarm(ServoEvents.ErrNegLimit);
         }
-        else
-        {
-            AlarmState.HardwareLimitNegative = false;
-        }
+        else AlarmState.HardwareLimitNegative = false;
 
-        // 3. Èí¼şÏŞÎ»±£»¤ (ÊµÊ±¼à²â)
-        if (_actualPosition > _cfg.SoftLimitPositive || _actualPosition < _cfg.SoftLimitNegative)
+        // è½¯ä»¶é™ä½ä¿æŠ¤
+        if (status.PosLimit_S || status.ActPos > _cfg.SoftLimitPositive)
         {
-            AlarmState.SoftwareLimitError = true;
-            if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftwareLimit.EventId))
+            AlarmState.SoftLimitPositiveError = true;
+            if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitPositive.EventId))
             {
-                RaiseAlarm(ServoEvents.ErrSoftwareLimit, _actualPosition);
+                RaiseAlarm(ServoEvents.ErrSoftLimitPositive, status.ActPos, _cfg.SoftLimitPositive);
             }
         }
         else
         {
-            AlarmState.SoftwareLimitError = false;
+            AlarmState.SoftLimitPositiveError = false;
         }
 
-        // 4. °²È«ÁªËø¼ì²é (ÔË¶¯ÖĞÍ»È»¶ªÊ§ÁªËø)
+        if (status.NegLimit_S || status.ActPos < _cfg.SoftLimitNegative)
+        {
+            AlarmState.SoftLimitNegativeError = true;
+            if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitNegative.EventId))
+            {
+                RaiseAlarm(ServoEvents.ErrSoftLimitNegative, status.ActPos, _cfg.SoftLimitNegative);
+            }
+        }
+        else
+        {
+            AlarmState.SoftLimitNegativeError = false;
+        }
+
+        // è”é”æ£€æŸ¥
         if (!_cfg.CanMove())
         {
             if (State != ServoState.Disabled && State != ServoState.Standby && State != ServoState.Error)
@@ -322,10 +306,7 @@ public class CM_Servo : IControlModule
                 RaiseAlarm(ServoEvents.ErrInterlockLost);
             }
         }
-        else
-        {
-            AlarmState.InterlockLost = false;
-        }
+        else AlarmState.InterlockLost = false;
     }
 
     private void RaiseAlarm(EventBase eventbase, params object[] args)
@@ -353,21 +334,24 @@ public class CM_Servo : IControlModule
     {
         if (State != ServoState.Error) return;
 
-        // Á¬ĞøÎïÀí¹ÊÕÏ£º½öµ±ÎïÀí±êÖ¾»Ö¸´Õı³£ºó£¬²ÅÔÊĞíÇå¿Õ±¨¾¯¼ÇÂ¼
         if (!AlarmState.DriveAlarm) TryClearAlarm(ServoEvents.ErrDriveAlarm);
-        if (!AlarmState.HardwareLimitPositive) TryClearAlarm(ServoEvents.ErrPEL);
-        if (!AlarmState.HardwareLimitNegative) TryClearAlarm(ServoEvents.ErrMEL);
-        if (!AlarmState.SoftwareLimitError) TryClearAlarm(ServoEvents.ErrSoftwareLimit);
+        if (!AlarmState.HardwareLimitPositive) TryClearAlarm(ServoEvents.ErrPosLimit);
+        if (!AlarmState.HardwareLimitNegative) TryClearAlarm(ServoEvents.ErrNegLimit);
+        if (!AlarmState.SoftLimitPositiveError) TryClearAlarm(ServoEvents.ErrSoftLimitPositive);
+        if (!AlarmState.SoftLimitNegativeError) TryClearAlarm(ServoEvents.ErrSoftLimitNegative);
         if (!AlarmState.InterlockLost) TryClearAlarm(ServoEvents.ErrInterlockLost);
 
-        // ÊÂ¼şĞÍ¹ÊÕÏ£¬²Ù×÷Ô±È·ÈÏ¸´Î»ºóÎŞÌõ¼şÇå³ı
+        // äº‹ä»¶å‹æ•…éšœæ— æ¡ä»¶æ¸…é™¤
         AlarmState.MoveWhileDisabledError = false;
         TryClearAlarm(ServoEvents.ErrMoveWhileDisabled);
+
+        AlarmState.TargetOutOfBoundsError = false;
+        TryClearAlarm(ServoEvents.ErrTargetOutOfBounds);
 
         if (!AlarmState.HasAnyError)
         {
             _isStopCommandSent = false;
-            ChangeState(_isServoOn ? ServoState.Standby : ServoState.Disabled);
+            ChangeState(_axisStatus.ServoOn ? ServoState.Standby : ServoState.Disabled);
             _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoReset);
         }
     }
@@ -384,7 +368,7 @@ public class CM_Servo : IControlModule
             }
             else
             {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "Ö¸ÁîÎ´¶¨Òå"));
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "æŒ‡ä»¤æœªå®šä¹‰"));
             }
         }
     }
@@ -392,11 +376,19 @@ public class CM_Servo : IControlModule
     private void PurgeCommands()
     {
         while (_commandQueue.TryDequeue(out var cmd))
-            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "±»ÏµÍ³Ç¿ÖÆÇåÀí"));
+            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç³»ç»Ÿå¼ºåˆ¶æ¸…ç†"));
     }
 
     private void RegisterCommandHandlers()
     {
+        _commandHandlers[Command.Enable] = cmd =>
+        {
+            bool enable = true;
+            if (cmd.Params.TryGetValue("State", out var stateStr)) bool.TryParse(stateStr, out enable);
+            EnableServo(enable);
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        };
+
         _commandHandlers[Command.Stop] = cmd =>
         {
             Stop();
@@ -409,34 +401,84 @@ public class CM_Servo : IControlModule
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
         };
 
-        // À©Õ¹µÄÔË¶¯Ö¸ÁîÓ³Éä (¿ÉÒÔÍ¨¹ı Params ½âÎö target, speed µÈ)
-        // ... (Ê¡ÂÔÁË²ÎÊı½âÎöµÄ´úÂë£¬ÀàËÆÖ®Ç°µÄÊµÏÖ)
+        _commandHandlers[Command.Home] = cmd =>
+        {
+            Home();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        };
+
+        _commandHandlers[Command.MoveAbs] = cmd =>
+        {
+            if (cmd.Params.TryGetValue("Target", out var tStr) && float.TryParse(tStr, out var target) &&
+                cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            {
+                MoveAbs(target, speed);
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+            }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå¤± Target æˆ– Speed å‚æ•°"));
+        };
+
+        _commandHandlers[Command.MoveRel] = cmd =>
+        {
+            if (cmd.Params.TryGetValue("Distance", out var dStr) && float.TryParse(dStr, out var dist) &&
+                cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            {
+                MoveRel(dist, speed);
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+            }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå¤± Distance æˆ– Speed å‚æ•°"));
+        };
+
+        _commandHandlers[Command.MoveVelocity] = cmd =>
+        {
+            if (cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            {
+                MoveVelocity(speed);
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+            }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå¤± Speed å‚æ•°"));
+        };
+
+        _commandHandlers[Command.SetTorque] = cmd =>
+        {
+            if (cmd.Params.TryGetValue("Torque", out var tqStr) && float.TryParse(tqStr, out var torque))
+            {
+                SetTorque(torque);
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+            }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå¤± Torque å‚æ•°"));
+        };
     }
 }
 
 // ==========================================
-// ÅäÖÃÀà¡¢IO½á¹¹Óë±¨¾¯×´Ì¬
+// é…ç½®ç±»ã€IOç»“æ„ä¸æŠ¥è­¦çŠ¶æ€
 // ==========================================
-public struct AxisIoStatus
+public struct AxisStatus
 {
-    public bool ALM; // Çı¶¯Æ÷±¨¾¯ (Alarm)
-    public bool PEL; // ÕıÏŞÎ» (Positive Limit)
-    public bool MEL; // ¸ºÏŞÎ» (Minus Limit)
-    public bool ORG; // Ô­µã´«¸ĞÆ÷ (Origin)
-    public bool INP; // µ½Î»ĞÅºÅ (In-Position)
+    public bool Alarm; // é©±åŠ¨å™¨æŠ¥è­¦
+    public bool PosLimit_H; // ç¡¬æ­£é™ä½
+    public bool NegLimit_H; // ç¡¬è´Ÿé™ä½
+    public bool Homed; // å›é›¶æ ‡å¿—
+    public bool PosLimit_S; // è½¯æ­£é™ä½
+    public bool NegLimit_S; // è½¯è´Ÿé™ä½
+    public bool Moving; // è¿åŠ¨ä¸­
+    public bool ServoOn; // ä½¿èƒ½
+    public double ActVel;//å½“å‰é€Ÿåº¦
+    public double ActPos;//å½“å‰ä½ç½®
+    public double ActTrq;//å½“å‰æ‰­çŸ©
 }
 
 public enum ServoState
 {
-    Disabled,      // Î´Ê¹ÄÜ
-    Standby,       // ÒÑÊ¹ÄÜ£¬¿ÕÏĞ
-    Homing,        // »ØÁãÖĞ
-    MovingAbs,     // ¾ø¶Ô¶¨Î»ÖĞ
-    MovingRel,     // Ïà¶Ô¶¨Î»ÖĞ
-    Jogging,       // µã¶¯ÖĞ
-    VelocityMode,  // ËÙ¶ÈÄ£Ê½ÔËĞĞÖĞ
-    TorqueMode,    // Á¦¾Ø¿ØÖÆÄ£Ê½ÖĞ
-    Error          // ¹ÊÕÏËøËÀ
+    Disabled,
+    Standby,
+    Homing,
+    MovingAbs,
+    MovingRel,
+    VelocityMode,
+    TorqueMode,
+    Error
 }
 
 public sealed class ServoAlarmState
@@ -446,52 +488,49 @@ public sealed class ServoAlarmState
     public bool DriveAlarm { get; internal set; }
     public bool HardwareLimitPositive { get; internal set; }
     public bool HardwareLimitNegative { get; internal set; }
-    public bool SoftwareLimitError { get; internal set; }
-    public bool InterlockLost { get; internal set; }
 
-    // ĞÂÔö£ºÎ´Ê¹ÄÜÔË¶¯±¨´í
+    public bool SoftLimitPositiveError { get; internal set; }
+    public bool SoftLimitNegativeError { get; internal set; }
+
+    public bool TargetOutOfBoundsError { get; internal set; }
+    public bool InterlockLost { get; internal set; }
     public bool MoveWhileDisabledError { get; internal set; }
 
     public bool HasAnyError => DriveAlarm || HardwareLimitPositive || HardwareLimitNegative ||
-                               SoftwareLimitError || InterlockLost || MoveWhileDisabledError;
+                               SoftLimitPositiveError || SoftLimitNegativeError || TargetOutOfBoundsError ||
+                               InterlockLost || MoveWhileDisabledError;
 
-    public override string ToString() => $"ALM={DriveAlarm}, PEL={HardwareLimitPositive}, MEL={HardwareLimitNegative}, SoftLimit={SoftwareLimitError}, Interlock={InterlockLost}, MoveDisabled={MoveWhileDisabledError}";
+    public override string ToString() => $"ALM={DriveAlarm}, PEL={HardwareLimitPositive}, MEL={HardwareLimitNegative}, SoftPos={SoftLimitPositiveError}, SoftNeg={SoftLimitNegativeError}, TargetErr={TargetOutOfBoundsError}, Interlock={InterlockLost}, MoveDisabled={MoveWhileDisabledError}";
 }
 
 public class ServoCfg
 {
     public required string Name { get; init; }
 
-    // ÈíÏŞÎ»ÉèÖÃ (ºÁÃ×/¶È µÈÒµÎñ¹¤³Ìµ¥Î»)
-    public double SoftLimitPositive { get; init; } = 9999.0;
-    public double SoftLimitNegative { get; init; } = -9999.0;
+    public ushort AxisId { get; set; } = 0;
+    public ushort HomeMode { get; set; } = 1;
+    public float SoftLimitPositive { get; init; } = 9999.0f;
+    public float SoftLimitNegative { get; init; } = -9999.0f;
 
-    // ÊÇ·ñÒªÇóÀ×Èüµ×²ã INP ĞÅºÅÁÁÆğ²ÅËãÕæÕıµ½Î»
-    public bool RequireInpSignal { get; init; } = true;
-
-    // ×´Ì¬¶ÁÈ¡Î¯ÍĞ (ÓÉÀ×Èü¿¨Çı¶¯²ãÊµÏÖ)
-    public required Func<double> ReadActualPosition { get; init; }
-    public required Func<double> ReadActualVelocity { get; init; }
-    public required Func<bool> ReadServoStatus { get; init; }
-    public required Func<bool> CheckMotionDone { get; init; }
-    public required Func<AxisIoStatus> ReadAxisIoStatus { get; init; }
+    public required Func<ushort,AxisStatus> ReadAxisStatus { get; init; }
     public required Func<bool> CanMove { get; init; }
 
-    // ¶¯×÷Ö´ĞĞÎ¯ÍĞ (·â×°À×Èü dmc_pmove, dmc_vmove µÈ)
-    public required Action<bool> ActuateEnable { get; init; }
-    public required Action<bool> ActuateStop { get; init; } // bool ²ÎÊı±íÊ¾ÊÇ·ñÎª¼±Í£ (Emergency)
-    public required Action ActuateHome { get; init; }
-    public required Action<double, double> ActuateMoveAbs { get; init; } // target, speed
-    public required Action<double, double> ActuateMoveRel { get; init; } // distance, speed
-    public required Action<bool, double> ActuateJog { get; init; } // isPositiveDir, speed
-    public required Action<double> ActuateVelocity { get; init; } // speed
-    public required Action<double> ActuateTorque { get; init; } // torque
+    public required Action<ushort, bool> ActuateEnable { get; init; }
+    public required Action<ushort, bool> ActuateStop { get; init; }
+    public required Action<ushort, ushort> ActuateHome { get; init; }
+    public required Action<ushort, float, float> ActuateMoveAbs { get; init; }
+    public required Action<ushort, float, float> ActuateMoveRel { get; init; }
+    public required Action<ushort, float> ActuateVelocity { get; init; }
+    public required Action<ushort, float> ActuateTorque { get; init; }
 
     public bool Validate()
     {
         return !string.IsNullOrEmpty(Name) &&
-               ReadActualPosition != null && CheckMotionDone != null &&
-               ActuateMoveAbs != null && ActuateStop != null;
+               ReadAxisStatus != null && CanMove != null &&
+               ActuateEnable != null && ActuateStop != null &&
+               ActuateHome != null && ActuateMoveAbs != null &&
+               ActuateMoveRel != null && ActuateVelocity != null &&
+               ActuateTorque != null;
     }
 }
 
@@ -507,22 +546,36 @@ public sealed class ServoSnapshot
 
 public static class ServoEvents
 {
-    public static readonly EventBase InfoHomingStarted = new() { EventId = 601, Severity = SeverityLevel.Info, MessageTemplate = "¿ªÊ¼»ØÔ­µã" };
-    public static readonly EventBase InfoHomeDone = new() { EventId = 602, Severity = SeverityLevel.Info, MessageTemplate = "»ØÔ­µãÍê³É" };
-    public static readonly EventBase InfoMoveAbsStarted = new() { EventId = 603, Severity = SeverityLevel.Info, MessageTemplate = "¾ø¶Ô¶¨Î»¿ªÊ¼ (Ä¿±ê: {0:F3}, ËÙ¶È: {1:F2})" };
-    public static readonly EventBase InfoMoveRelStarted = new() { EventId = 604, Severity = SeverityLevel.Info, MessageTemplate = "Ïà¶Ô¶¨Î»¿ªÊ¼ (¾àÀë: {0:F3}, ËÙ¶È: {1:F2})" };
-    public static readonly EventBase InfoMoveDone = new() { EventId = 605, Severity = SeverityLevel.Info, MessageTemplate = "ÖáÍ£Ö¹µ½Î» (µ±Ç°Î»ÖÃ: {0:F3})" };
-    public static readonly EventBase InfoReset = new() { EventId = 606, Severity = SeverityLevel.Info, MessageTemplate = "Öá±¨¾¯¸´Î»" };
+    public static readonly EventBase InfoHomingStarted = new() { EventId = 601, Severity = SeverityLevel.Info, MessageTemplate = "å¼€å§‹å›åŸç‚¹" };
+    public static readonly EventBase InfoHomeDone = new() { EventId = 602, Severity = SeverityLevel.Info, MessageTemplate = "å›åŸç‚¹å®Œæˆ" };
+    public static readonly EventBase InfoMoveAbsStarted = new() { EventId = 603, Severity = SeverityLevel.Info, MessageTemplate = "ç»å¯¹å®šä½å¼€å§‹ (ç›®æ ‡: {0:F3}, é€Ÿåº¦: {1:F2})" };
+    public static readonly EventBase InfoMoveRelStarted = new() { EventId = 604, Severity = SeverityLevel.Info, MessageTemplate = "ç›¸å¯¹å®šä½å¼€å§‹ (è·ç¦»: {0:F3}, é€Ÿåº¦: {1:F2})" };
+    public static readonly EventBase InfoMoveDone = new() { EventId = 605, Severity = SeverityLevel.Info, MessageTemplate = "è½´åœæ­¢åˆ°ä½ (å½“å‰ä½ç½®: {0:F3})" };
+    public static readonly EventBase InfoReset = new() { EventId = 606, Severity = SeverityLevel.Info, MessageTemplate = "è½´æŠ¥è­¦å¤ä½" };
+    public static readonly EventBase InfoServoEnabled = new() { EventId = 607, Severity = SeverityLevel.Info, MessageTemplate = "ä¼ºæœä½¿èƒ½æ‰“å¼€" };
+    public static readonly EventBase InfoServoDisabled = new() { EventId = 608, Severity = SeverityLevel.Info, MessageTemplate = "ä¼ºæœä½¿èƒ½å…³é—­" };
+    public static readonly EventBase InfoStopped = new() { EventId = 609, Severity = SeverityLevel.Info, MessageTemplate = "è§¦å‘åœæ­¢æŒ‡ä»¤ (æ€¥åœ: {0})" };
+    public static readonly EventBase InfoMoveVelStarted = new() { EventId = 610, Severity = SeverityLevel.Info, MessageTemplate = "é€Ÿåº¦æ¨¡å¼è¿è¡Œå¼€å§‹ (è®¾å®šé€Ÿåº¦: {0:F2})" };
+    public static readonly EventBase InfoTorqueStarted = new() { EventId = 611, Severity = SeverityLevel.Info, MessageTemplate = "åŠ›çŸ©æ¨¡å¼æ§åˆ¶å¼€å§‹ (è®¾å®šåŠ›çŸ©: {0:F2}%)" };
 
-    public static readonly EventBase ErrDriveAlarm = new() { EventId = 620, Severity = SeverityLevel.Error, MessageTemplate = "ËÅ·şÇı¶¯Æ÷·¢ÉúÖÂÃü±¨¾¯ (ALM)" };
-    public static readonly EventBase ErrPEL = new() { EventId = 621, Severity = SeverityLevel.Error, MessageTemplate = "´¥·¢ÕıÏòÓ²ÏŞÎ» (PEL)" };
-    public static readonly EventBase ErrMEL = new() { EventId = 622, Severity = SeverityLevel.Error, MessageTemplate = "´¥·¢¸ºÏòÓ²ÏŞÎ» (MEL)" };
-    public static readonly EventBase ErrSoftwareLimit = new() { EventId = 623, Severity = SeverityLevel.Error, MessageTemplate = "Ô½¹ıÈí¼şÏŞÎ»»òÄ¿±êÔ½½ç (Î»ÖÃ: {0:F3})" };
-    public static readonly EventBase ErrInterlockLost = new() { EventId = 624, Severity = SeverityLevel.Error, MessageTemplate = "ÖáÔË¶¯ÁªËø¶ªÊ§" };
-    public static readonly EventBase ErrMoveWhileDisabled = new()
-    {
-        EventId = 625,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "ËÅ·şÎ´Ê¹ÄÜÊ±ÊÕµ½ÔË¶¯Ö¸Áî£¬¾Ü¾øÖ´ĞĞ"
-    };
+    public static readonly EventBase ErrDriveAlarm = new() { EventId = 620, Severity = SeverityLevel.Error, MessageTemplate = "ä¼ºæœé©±åŠ¨å™¨å‘ç”Ÿè‡´å‘½æŠ¥è­¦" };
+    public static readonly EventBase ErrPosLimit = new() { EventId = 621, Severity = SeverityLevel.Error, MessageTemplate = "è§¦å‘æ­£å‘ç¡¬é™ä½ (PEL)" };
+    public static readonly EventBase ErrNegLimit = new() { EventId = 622, Severity = SeverityLevel.Error, MessageTemplate = "è§¦å‘è´Ÿå‘ç¡¬é™ä½ (MEL)" };
+    public static readonly EventBase ErrSoftLimitPositive = new() { EventId = 623, Severity = SeverityLevel.Error, MessageTemplate = "ç‰©ç†è¿è¡Œè¶Šè¿‡æ­£å‘è½¯ä»¶é™ä½ (å½“å‰ä½ç½®: {0:F3} > é™åˆ¶: {1:F3})" };
+    public static readonly EventBase ErrSoftLimitNegative = new() { EventId = 624, Severity = SeverityLevel.Error, MessageTemplate = "ç‰©ç†è¿è¡Œè¶Šè¿‡è´Ÿå‘è½¯ä»¶é™ä½ (å½“å‰ä½ç½®: {0:F3} < é™åˆ¶: {1:F3})" };
+    public static readonly EventBase ErrInterlockLost = new() { EventId = 625, Severity = SeverityLevel.Error, MessageTemplate = "è½´è¿åŠ¨è”é”ä¸¢å¤±" };
+    public static readonly EventBase ErrMoveWhileDisabled = new() { EventId = 626, Severity = SeverityLevel.Error, MessageTemplate = "ä¼ºæœæœªä½¿èƒ½æ—¶æ”¶åˆ°è¿åŠ¨æŒ‡ä»¤ï¼Œæ‹’ç»æ‰§è¡Œ" };
+    public static readonly EventBase ErrTargetOutOfBounds = new() { EventId = 627, Severity = SeverityLevel.Error, MessageTemplate = "ç›®æ ‡ä½ç½®è¶Šè¿‡è½¯ä»¶æé™ï¼Œæ‹’ç»æ‰§è¡Œ (ç›®æ ‡: {0:F3}, é™åˆ¶: [{1:F3}, {2:F3}])" };
+}
+
+public interface IServoFactory
+{
+    CM_Servo Create(ServoCfg cfg);
+}
+
+public class ServoFactory : IServoFactory
+{
+    private readonly IServiceProvider _sp;
+    public ServoFactory(IServiceProvider sp) => _sp = sp;
+    public CM_Servo Create(ServoCfg cfg) => ActivatorUtilities.CreateInstance<CM_Servo>(_sp, cfg);
 }
