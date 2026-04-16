@@ -156,10 +156,10 @@ public class EM_Lid : S88EquipmentModuleBase
         if (AlarmState.ChildModuleFault) RaiseAlarm(LidEvents.ErrChildModuleFault);
         else TryClearAlarm(LidEvents.ErrChildModuleFault);
 
-        if (AlarmState.MissingOpenParameterError) RaiseAlarm(LidEvents.ErrMissingOpenParameter, "EM_Lid.OpenPos 或 EM_Lid.OpenVel");
+        if (AlarmState.MissingOpenParameterError) RaiseAlarm(LidEvents.ErrMissingOpenParameter, "EM_Lid.OpenPos 或 EM_Lid.OpenVel 或 EM_Lid.Taccdec");
         else TryClearAlarm(LidEvents.ErrMissingOpenParameter);
 
-        if (AlarmState.MissingCloseParameterError) RaiseAlarm(LidEvents.ErrMissingCloseParameter, "EM_Lid.ClosePos 或 EM_Lid.CloseVel");
+        if (AlarmState.MissingCloseParameterError) RaiseAlarm(LidEvents.ErrMissingCloseParameter, "EM_Lid.ClosePos 或 EM_Lid.CloseVel 或 EM_Lid.Taccdec");
         else TryClearAlarm(LidEvents.ErrMissingCloseParameter);
 
         if (AlarmState.NotAtAtmosphereError) RaiseAlarm(LidEvents.ErrNotAtAtmosphere, _chamberPressure);

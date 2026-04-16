@@ -449,7 +449,7 @@ public class CM_Servo : IControlModule
                 MoveAbs(target, speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
-            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Target 或 Speed 参数"));
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Target/Speed/Taccdec 参数"));
         };
 
         _commandHandlers[Command.MoveRel] = cmd =>
@@ -461,7 +461,7 @@ public class CM_Servo : IControlModule
                 MoveRel(dist, speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
-            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Distance 或 Speed 参数"));
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Distance/Speed/Taccdec 参数"));
         };
 
         _commandHandlers[Command.MoveVelocity] = cmd =>
@@ -472,7 +472,7 @@ public class CM_Servo : IControlModule
                 MoveVelocity(speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
-            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Speed 参数"));
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Speed/Taccdec 参数"));
         };
 
         _commandHandlers[Command.SetTorque] = cmd =>
