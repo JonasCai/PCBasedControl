@@ -7,6 +7,16 @@ namespace Controller.Hardware;
 
 public partial class LTDMC
 {
+    [DllImport("LTDMC.dll", EntryPoint = "nmc_torque_move", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
+    public static extern short nmc_torque_move(UInt16 CardNo, UInt16 axis, int Torque, ushort PosLimitValid, double PosLimitValue, ushort PosMode);
+
+    [DllImport("LTDMC.dll", EntryPoint = "nmc_change_torque", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
+    public static extern short nmc_change_torque(UInt16 CardNo, UInt16 axis, int Torque);
+
+    [DllImport("LTDMC.dll", EntryPoint = "nmc_get_torque", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
+    public static extern short nmc_get_torque(UInt16 CardNo, UInt16 axis, ref int Torque);
+
+
     [DllImport("LTDMC.dll", EntryPoint = "dmc_read_inport_ex", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
     public static extern short dmc_read_inport_ex(UInt16 CardNo, UInt16 portno, ref uint status);
 

@@ -3,7 +3,6 @@ using Controller.gRPC;
 using Controller.S88;
 using System.Collections.Concurrent;
 
-
 namespace Controller._01.ControlModule;
 
 public class CM_Servo : IControlModule
@@ -36,7 +35,7 @@ public class CM_Servo : IControlModule
         // 处理排队的外部指令
         ProcessCommandQueue();
 
-        // 评估报警及硬/软限位联锁 (正负软限位已分离)
+        // 评估报警及硬/软限位联锁
         EvaluateAlarms(_axisStatus);
 
         // 故障态立即切断运动，并跳过后续状态机
@@ -62,6 +61,10 @@ public class CM_Servo : IControlModule
                 break;
 
             case ServoState.Homing:
+                // 总线延迟盲区内，忽略 Moving 状态
+                if (_currentTimestampMs - _commandIssueTimestampMs < _cfg.BusLatencyBlindTimeMs)
+                    break;
+
                 if (!_axisStatus.Moving)
                 {
                     ChangeState(ServoState.Standby);
@@ -72,6 +75,9 @@ public class CM_Servo : IControlModule
 
             case ServoState.MovingAbs:
             case ServoState.MovingRel:
+                if (_currentTimestampMs - _commandIssueTimestampMs < _cfg.BusLatencyBlindTimeMs)
+                    break;
+
                 if (!_axisStatus.Moving)
                 {
                     ChangeState(ServoState.Standby);
@@ -82,7 +88,7 @@ public class CM_Servo : IControlModule
 
             case ServoState.VelocityMode:
             case ServoState.TorqueMode:
-                if (_isStopCommandSent || (!_axisStatus.Moving && State != ServoState.TorqueMode))
+                if (_isStopCommandSent)
                 {
                     ChangeState(ServoState.Standby);
                     _isStopCommandSent = false;
@@ -124,56 +130,78 @@ public class CM_Servo : IControlModule
     public void Home()
     {
         if (!CheckBeforeMove()) return;
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
         _cfg.ActuateHome(_cfg.AxisId, _cfg.HomeMode);
-        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
+
+        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.Homing);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomingStarted);
     }
 
-    public void MoveAbs(float targetPos, float speed)
+    public void MoveAbs(double targetPos, double speed, double tacc, double tdec)
     {
         if (!CheckBeforeMove(targetPos)) return;
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed);
-        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
+        _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed, tacc, tdec);
+
+        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingAbs);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveAbsStarted, targetPos, speed);
     }
 
-    public void MoveRel(float distance, float speed)
+    public void MoveRel(double distance, double speed, double tacc, double tdec)
     {
         double expectedTarget = _axisStatus.ActPos + distance;
         if (!CheckBeforeMove(expectedTarget)) return;
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed);
-        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
+        _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed, tacc, tdec);
+
+        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingRel);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveRelStarted, distance, speed);
     }
 
-    public void MoveVelocity(float speed)
+    public void MoveVelocity(double speed,double taccdec)
     {
         if (!CheckBeforeMove()) return;
+        if (State == ServoState.TorqueMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateVelocity(_cfg.AxisId, speed);
-        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
-        ChangeState(ServoState.VelocityMode);
+        if (State == ServoState.VelocityMode)
+        {
+            _cfg.ChangeVelocity(_cfg.AxisId, speed, taccdec); // 在线变速
+        }
+        else
+        {
+            _cfg.ActuateVelocity(_cfg.AxisId, speed, taccdec);
+            _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+            ChangeState(ServoState.VelocityMode);
+        }
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveVelStarted, speed);
     }
 
-    public void SetTorque(float torquePercent)
+    public void SetTorque(double torquePercent)
     {
         if (!CheckBeforeMove()) return;
+        if (State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateTorque(_cfg.AxisId, torquePercent);
-        _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
-        ChangeState(ServoState.TorqueMode);
+        if (State == ServoState.TorqueMode)
+        {
+            _cfg.ChangeTorque(_cfg.AxisId, torquePercent); // 在线变力
+        }
+        else
+        {
+            _cfg.ActuateTorque(_cfg.AxisId, torquePercent);
+            _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+            ChangeState(ServoState.TorqueMode);
+        }
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoTorqueStarted, torquePercent);
     }
 
@@ -184,12 +212,14 @@ public class CM_Servo : IControlModule
     public ServoAlarmState AlarmState { get; } = new();
     public double ActualPosition => _axisStatus.ActPos;
     public double ActualVelocity => _axisStatus.ActVel;
+    public double ActualTorque => _axisStatus.ActTrq;
 
     public ServoSnapshot GetSnapshot() => new()
     {
         Name = _cfg.Name,
         State = State,
         AlarmState = AlarmState,
+        ActualTorque = _axisStatus.ActTrq,
         ActualPosition = _axisStatus.ActPos,
         ActualVelocity = _axisStatus.ActVel,
         IsServoOn = _axisStatus.ServoOn
@@ -208,6 +238,7 @@ public class CM_Servo : IControlModule
     private long _currentTimestampMs;
     private AxisStatus _axisStatus;
     private bool _isStopCommandSent = false;
+    private long _commandIssueTimestampMs = 0; // 解决总线延迟的幽灵停止问题
 
     private void ChangeState(ServoState newState)
     {
@@ -219,6 +250,7 @@ public class CM_Servo : IControlModule
     {
         if (State == ServoState.Error) return false;
 
+        // 验证使能状态
         if (!_axisStatus.ServoOn)
         {
             AlarmState.MoveWhileDisabledError = true;
@@ -226,6 +258,7 @@ public class CM_Servo : IControlModule
             return false;
         }
 
+        // 验证外部联锁
         if (!_cfg.CanMove())
         {
             AlarmState.InterlockLost = true;
@@ -233,6 +266,7 @@ public class CM_Servo : IControlModule
             return false;
         }
 
+        // 指令越界保护
         if (targetPos.HasValue)
         {
             if (targetPos.Value > _cfg.SoftLimitPositive || targetPos.Value < _cfg.SoftLimitNegative)
@@ -247,15 +281,15 @@ public class CM_Servo : IControlModule
 
     private void EvaluateAlarms(AxisStatus status)
     {
-        // 驱动器报警 (ALM)
+        // 伺服报警
         if (status.Alarm)
         {
             AlarmState.DriveAlarm = true;
-            RaiseAlarm(ServoEvents.ErrDriveAlarm);
+            RaiseAlarm(ServoEvents.ErrDriveAlarm, AlarmState.DriveAlarmId);
         }
         else AlarmState.DriveAlarm = false;
 
-        // 硬件极限 (PEL / MEL)
+        // 硬件正限位 (PEL)
         if (status.PosLimit_H)
         {
             AlarmState.HardwareLimitPositive = true;
@@ -263,6 +297,7 @@ public class CM_Servo : IControlModule
         }
         else AlarmState.HardwareLimitPositive = false;
 
+        // 硬件负限位 (MEL)
         if (status.NegLimit_H)
         {
             AlarmState.HardwareLimitNegative = true;
@@ -270,34 +305,25 @@ public class CM_Servo : IControlModule
         }
         else AlarmState.HardwareLimitNegative = false;
 
-        // 软件限位保护
+        // 软件正限位保护
         if (status.PosLimit_S || status.ActPos > _cfg.SoftLimitPositive)
         {
             AlarmState.SoftLimitPositiveError = true;
             if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitPositive.EventId))
-            {
                 RaiseAlarm(ServoEvents.ErrSoftLimitPositive, status.ActPos, _cfg.SoftLimitPositive);
-            }
         }
-        else
-        {
-            AlarmState.SoftLimitPositiveError = false;
-        }
+        else AlarmState.SoftLimitPositiveError = false;
 
+        // 软件负限位保护
         if (status.NegLimit_S || status.ActPos < _cfg.SoftLimitNegative)
         {
             AlarmState.SoftLimitNegativeError = true;
             if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitNegative.EventId))
-            {
                 RaiseAlarm(ServoEvents.ErrSoftLimitNegative, status.ActPos, _cfg.SoftLimitNegative);
-            }
         }
-        else
-        {
-            AlarmState.SoftLimitNegativeError = false;
-        }
+        else AlarmState.SoftLimitNegativeError = false;
 
-        // 联锁检查
+        // 运行中安全联锁丢失
         if (!_cfg.CanMove())
         {
             if (State != ServoState.Disabled && State != ServoState.Standby && State != ServoState.Error)
@@ -334,6 +360,16 @@ public class CM_Servo : IControlModule
     {
         if (State != ServoState.Error) return;
 
+        _cfg.ClearAxisError(_cfg.AxisId);
+
+        // 【立即清除】无需等待物理恢复的事件型报警
+        AlarmState.MoveWhileDisabledError = false;
+        TryClearAlarm(ServoEvents.ErrMoveWhileDisabled);
+
+        AlarmState.TargetOutOfBoundsError = false;
+        TryClearAlarm(ServoEvents.ErrTargetOutOfBounds);
+
+        // 【尝试清除】如果物理标志已在上一帧恢复，则清除报警历史
         if (!AlarmState.DriveAlarm) TryClearAlarm(ServoEvents.ErrDriveAlarm);
         if (!AlarmState.HardwareLimitPositive) TryClearAlarm(ServoEvents.ErrPosLimit);
         if (!AlarmState.HardwareLimitNegative) TryClearAlarm(ServoEvents.ErrNegLimit);
@@ -341,13 +377,7 @@ public class CM_Servo : IControlModule
         if (!AlarmState.SoftLimitNegativeError) TryClearAlarm(ServoEvents.ErrSoftLimitNegative);
         if (!AlarmState.InterlockLost) TryClearAlarm(ServoEvents.ErrInterlockLost);
 
-        // 事件型故障无条件清除
-        AlarmState.MoveWhileDisabledError = false;
-        TryClearAlarm(ServoEvents.ErrMoveWhileDisabled);
-
-        AlarmState.TargetOutOfBoundsError = false;
-        TryClearAlarm(ServoEvents.ErrTargetOutOfBounds);
-
+        // 如果所有错误都已解除，恢复机台正常状态
         if (!AlarmState.HasAnyError)
         {
             _isStopCommandSent = false;
@@ -379,6 +409,9 @@ public class CM_Servo : IControlModule
             cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "系统强制清理"));
     }
 
+    // ==========================================
+    // 外部通信指令解析映射表
+    // ==========================================
     private void RegisterCommandHandlers()
     {
         _commandHandlers[Command.Enable] = cmd =>
@@ -409,10 +442,12 @@ public class CM_Servo : IControlModule
 
         _commandHandlers[Command.MoveAbs] = cmd =>
         {
-            if (cmd.Params.TryGetValue("Target", out var tStr) && float.TryParse(tStr, out var target) &&
-                cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            if (cmd.Params.TryGetValue("Target", out var tStr) && double.TryParse(tStr, out var target) &&
+                cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
+                cmd.Params.TryGetValue("Tacc", out var accStr) && double.TryParse(accStr, out var tacc) &&
+                cmd.Params.TryGetValue("Tdec", out var decStr) && double.TryParse(decStr, out var tdec))
             {
-                MoveAbs(target, speed);
+                MoveAbs(target, speed, tacc, tdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Target 或 Speed 参数"));
@@ -420,10 +455,12 @@ public class CM_Servo : IControlModule
 
         _commandHandlers[Command.MoveRel] = cmd =>
         {
-            if (cmd.Params.TryGetValue("Distance", out var dStr) && float.TryParse(dStr, out var dist) &&
-                cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            if (cmd.Params.TryGetValue("Distance", out var dStr) && double.TryParse(dStr, out var dist) &&
+                cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
+                cmd.Params.TryGetValue("Tacc", out var accStr) && double.TryParse(accStr, out var tacc) &&
+                cmd.Params.TryGetValue("Tdec", out var decStr) && double.TryParse(decStr, out var tdec))
             {
-                MoveRel(dist, speed);
+                MoveRel(dist, speed, tacc, tdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Distance 或 Speed 参数"));
@@ -431,9 +468,10 @@ public class CM_Servo : IControlModule
 
         _commandHandlers[Command.MoveVelocity] = cmd =>
         {
-            if (cmd.Params.TryGetValue("Speed", out var sStr) && float.TryParse(sStr, out var speed))
+            if (cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
+                cmd.Params.TryGetValue("Tacc", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
             {
-                MoveVelocity(speed);
+                MoveVelocity(speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Speed 参数"));
@@ -441,7 +479,7 @@ public class CM_Servo : IControlModule
 
         _commandHandlers[Command.SetTorque] = cmd =>
         {
-            if (cmd.Params.TryGetValue("Torque", out var tqStr) && float.TryParse(tqStr, out var torque))
+            if (cmd.Params.TryGetValue("Torque", out var tqStr) && double.TryParse(tqStr, out var torque))
             {
                 SetTorque(torque);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
@@ -456,17 +494,17 @@ public class CM_Servo : IControlModule
 // ==========================================
 public struct AxisStatus
 {
-    public bool Alarm; // 驱动器报警
-    public bool PosLimit_H; // 硬正限位
-    public bool NegLimit_H; // 硬负限位
-    public bool Homed; // 回零标志
-    public bool PosLimit_S; // 软正限位
-    public bool NegLimit_S; // 软负限位
-    public bool Moving; // 运动中
-    public bool ServoOn; // 使能
-    public double ActVel;//当前速度
-    public double ActPos;//当前位置
-    public double ActTrq;//当前扭矩
+    public bool Alarm;
+    public bool PosLimit_H;
+    public bool NegLimit_H;
+    public bool Homed;
+    public bool PosLimit_S;
+    public bool NegLimit_S;
+    public bool Moving;
+    public bool ServoOn;
+    public double ActVel;
+    public double ActPos;
+    public double ActTrq;
 }
 
 public enum ServoState
@@ -486,12 +524,11 @@ public sealed class ServoAlarmState
     public bool HasAnyWarning => false;
 
     public bool DriveAlarm { get; internal set; }
+    public ushort DriveAlarmId { get; internal set; }
     public bool HardwareLimitPositive { get; internal set; }
     public bool HardwareLimitNegative { get; internal set; }
-
     public bool SoftLimitPositiveError { get; internal set; }
     public bool SoftLimitNegativeError { get; internal set; }
-
     public bool TargetOutOfBoundsError { get; internal set; }
     public bool InterlockLost { get; internal set; }
     public bool MoveWhileDisabledError { get; internal set; }
@@ -500,28 +537,33 @@ public sealed class ServoAlarmState
                                SoftLimitPositiveError || SoftLimitNegativeError || TargetOutOfBoundsError ||
                                InterlockLost || MoveWhileDisabledError;
 
-    public override string ToString() => $"ALM={DriveAlarm}, PEL={HardwareLimitPositive}, MEL={HardwareLimitNegative}, SoftPos={SoftLimitPositiveError}, SoftNeg={SoftLimitNegativeError}, TargetErr={TargetOutOfBoundsError}, Interlock={InterlockLost}, MoveDisabled={MoveWhileDisabledError}";
+    public override string ToString() => $"ALM={DriveAlarm}, ALMId={DriveAlarmId}, PEL={HardwareLimitPositive}, MEL={HardwareLimitNegative}, SoftPos={SoftLimitPositiveError}, SoftNeg={SoftLimitNegativeError}, TargetErr={TargetOutOfBoundsError}, Interlock={InterlockLost}, MoveDisabled={MoveWhileDisabledError}";
 }
 
 public class ServoCfg
 {
     public required string Name { get; init; }
+    public required ushort AxisId { get; init; } = 1;
+    public required ushort HomeMode { get; init; } = 1;
 
-    public ushort AxisId { get; set; } = 0;
-    public ushort HomeMode { get; set; } = 1;
-    public float SoftLimitPositive { get; init; } = 9999.0f;
-    public float SoftLimitNegative { get; init; } = -9999.0f;
+    public long BusLatencyBlindTimeMs { get; init; } = 50;
 
-    public required Func<ushort,AxisStatus> ReadAxisStatus { get; init; }
+    public double SoftLimitPositive { get; init; } = 9999.0;
+    public double SoftLimitNegative { get; init; } = -9999.0;
+
+    public required Func<ushort, AxisStatus> ReadAxisStatus { get; init; }
     public required Func<bool> CanMove { get; init; }
 
+    public required Action<ushort> ClearAxisError { get; init; }
     public required Action<ushort, bool> ActuateEnable { get; init; }
     public required Action<ushort, bool> ActuateStop { get; init; }
     public required Action<ushort, ushort> ActuateHome { get; init; }
-    public required Action<ushort, float, float> ActuateMoveAbs { get; init; }
-    public required Action<ushort, float, float> ActuateMoveRel { get; init; }
-    public required Action<ushort, float> ActuateVelocity { get; init; }
-    public required Action<ushort, float> ActuateTorque { get; init; }
+    public required Action<ushort, double, double,double,double> ActuateMoveAbs { get; init; }
+    public required Action<ushort, double, double, double, double> ActuateMoveRel { get; init; }
+    public required Action<ushort, double, double> ActuateVelocity { get; init; }
+    public required Action<ushort, double, double> ChangeVelocity { get; init; }
+    public required Action<ushort, double> ActuateTorque { get; init; }
+    public required Action<ushort, double> ChangeTorque { get; init; }
 
     public bool Validate()
     {
@@ -530,7 +572,8 @@ public class ServoCfg
                ActuateEnable != null && ActuateStop != null &&
                ActuateHome != null && ActuateMoveAbs != null &&
                ActuateMoveRel != null && ActuateVelocity != null &&
-               ActuateTorque != null;
+               ActuateTorque != null && ClearAxisError != null &&
+               ChangeVelocity != null && ChangeTorque != null;
     }
 }
 
@@ -539,6 +582,7 @@ public sealed class ServoSnapshot
     public required string Name { get; init; }
     public required ServoState State { get; init; }
     public required ServoAlarmState AlarmState { get; init; } = new();
+    public required double ActualTorque { get; init; }
     public required double ActualPosition { get; init; }
     public required double ActualVelocity { get; init; }
     public required bool IsServoOn { get; init; }
@@ -552,13 +596,14 @@ public static class ServoEvents
     public static readonly EventBase InfoMoveRelStarted = new() { EventId = 604, Severity = SeverityLevel.Info, MessageTemplate = "相对定位开始 (距离: {0:F3}, 速度: {1:F2})" };
     public static readonly EventBase InfoMoveDone = new() { EventId = 605, Severity = SeverityLevel.Info, MessageTemplate = "轴停止到位 (当前位置: {0:F3})" };
     public static readonly EventBase InfoReset = new() { EventId = 606, Severity = SeverityLevel.Info, MessageTemplate = "轴报警复位" };
+
     public static readonly EventBase InfoServoEnabled = new() { EventId = 607, Severity = SeverityLevel.Info, MessageTemplate = "伺服使能打开" };
     public static readonly EventBase InfoServoDisabled = new() { EventId = 608, Severity = SeverityLevel.Info, MessageTemplate = "伺服使能关闭" };
     public static readonly EventBase InfoStopped = new() { EventId = 609, Severity = SeverityLevel.Info, MessageTemplate = "触发停止指令 (急停: {0})" };
     public static readonly EventBase InfoMoveVelStarted = new() { EventId = 610, Severity = SeverityLevel.Info, MessageTemplate = "速度模式运行开始 (设定速度: {0:F2})" };
     public static readonly EventBase InfoTorqueStarted = new() { EventId = 611, Severity = SeverityLevel.Info, MessageTemplate = "力矩模式控制开始 (设定力矩: {0:F2}%)" };
 
-    public static readonly EventBase ErrDriveAlarm = new() { EventId = 620, Severity = SeverityLevel.Error, MessageTemplate = "伺服驱动器发生致命报警" };
+    public static readonly EventBase ErrDriveAlarm = new() { EventId = 620, Severity = SeverityLevel.Error, MessageTemplate = "伺服驱动器发生致命报警 (AlarmId : {0})" };
     public static readonly EventBase ErrPosLimit = new() { EventId = 621, Severity = SeverityLevel.Error, MessageTemplate = "触发正向硬限位 (PEL)" };
     public static readonly EventBase ErrNegLimit = new() { EventId = 622, Severity = SeverityLevel.Error, MessageTemplate = "触发负向硬限位 (MEL)" };
     public static readonly EventBase ErrSoftLimitPositive = new() { EventId = 623, Severity = SeverityLevel.Error, MessageTemplate = "物理运行越过正向软件限位 (当前位置: {0:F3} > 限制: {1:F3})" };

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Text.Json;
 
@@ -8,6 +9,7 @@ namespace Controller.Common;
 public interface IRetainDataService
 {
     T GetValue<T>(string key, T defaultValue);
+    bool TryGetValue<T>(string key, [MaybeNullWhen(false)] out T value);
     void SetValue<T>(string key, T value);
 }
 
@@ -54,6 +56,31 @@ public class JsonRetainDataService : IRetainDataService
             }
         }
         return defaultValue;
+    }
+
+    public bool TryGetValue<T>(string key, [MaybeNullWhen(false)] out T value)
+    {
+        if (_data.TryGetValue(key, out JsonElement element))
+        {
+            try
+            {
+                T? deserialized = element.Deserialize<T>();
+
+                // 判定非 null (对于 double 这种值类型，只要不抛异常它就必定不为 null)
+                if (deserialized is not null)
+                {
+                    value = deserialized;
+                    return true;
+                }
+            }
+            catch
+            {
+                // 反序列化失败（如 JSON 类型与 T 不匹配），直接跳到下方兜底
+            }
+        }
+
+        value = default!;
+        return false;
     }
 
     public void SetValue<T>(string key, T value)

@@ -7,18 +7,18 @@ using System.Runtime.InteropServices;
 
 namespace Controller.S88;
 
-public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88EquipmentModuleBase> logger) : IEquipmentModule
+public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentModuleBase> logger, IEventProducer eventProducer) : IEquipmentModule
 {
     // ==========================================
     // IEquipmentModule 接口方法
     // ==========================================
-    public string Name => _cfg.Name;
+    public string Name => name;
     public bool HasAnyWarning => false;
-    public bool HasAnyError => false;
+    public bool HasAnyError => State == EMState.Error;
     public EMState State { get; private set; } = EMState.Idle;
     public void ExecuteCommand(InternalCommand command)
     {
-        if (command.TargetObject == _cfg.Name)
+        if (command.TargetObject == Name)
         {
             _commandQueue.Enqueue(command);
             return;
@@ -34,16 +34,16 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     }
     public void Refresh(long currentTimestampMs)
     {
-        _currentTimestampMs = currentTimestampMs;
+        CurrentTimestampMs = currentTimestampMs;
 
         IsNewStep = _stepChangedPending;
         _stepChangedPending = false;
 
         try
         {
-            CheckHardwareInterlocks();
-
             ProcessCommandQueue();
+
+            OnExecute();
 
             if (State == EMState.Busy)
                 OnExecute();
@@ -53,13 +53,16 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
             {
                 cache[i].Refresh(currentTimestampMs);
             }
+
+            AlarmHandler();
         }
         catch (Exception ex)
         {
-            if (State != EMState.Fault)
+            if (State != EMState.Error)
             {
-                State = EMState.Fault;
-                _logger.LogError(ex, "EM [{Name}] 发生内部异常，强制进入 Fault 状态",Name);
+                OnAbort(); 
+                ChangeState(EMState.Error);
+                _logger.LogError(ex, "EM [{Name}] 发生内部未知异常，强制进入 Error 状态", Name);
             }
             ToSafe();
         }
@@ -67,8 +70,8 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     public void ToSafe()
     {
         PurgeCommands();
-        State = EMState.Idle;
-        var cache = _cMsCache; // 读取 volatile 引用
+        ChangeState(EMState.Idle);
+        var cache = _cMsCache;
         for (int i = 0; i < cache.Length; i++)
             cache[i].ToSafe();
     }
@@ -79,14 +82,25 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     // 供子类重写的逻辑钩子 (Hooks)
     // ==========================================
     protected virtual void OnExecute() { }
-    protected virtual void CheckHardwareInterlocks() { }
-
+    protected virtual void OnAbort() { }
+    protected virtual void AlarmHandler() {}
+    protected virtual void Reset(InternalCommand cmd)
+    {
+        // 将 Reset 指令透传给底层所有 CM
+        var cache = _cMsCache;
+        for (int i = 0; i < cache.Length; i++)
+        {
+            // 为每个 CM 创建独立的 Command 副本，避免引用冲突
+            cache[i].ExecuteCommand(cmd with { CallbackTcs = new(), CancelToken = new() });
+        }
+    }
 
     // ==========================================
     // 供子类调用的接口
     // ==========================================
     protected bool IsNewStep { get; private set; }
-    protected long StepTime => _currentTimestampMs - _stepStartTimestamp;
+    protected long CurrentTimestampMs { get; private set; }
+    protected long StepTime => CurrentTimestampMs - _stepStartTimestamp;
     protected int Step
     {
         get => _step;
@@ -96,7 +110,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
             {
                 _step = value;
                 _stepChangedPending = true;
-                _stepStartTimestamp = _currentTimestampMs;
+                _stepStartTimestamp = CurrentTimestampMs;
             }
         }
     }
@@ -107,21 +121,65 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
             _cMsCache = _cMs.Values.ToArray();
     }
     protected void RegisterCommandHandler(Command cmdName, Action<InternalCommand> handler) => _commandHandlers[cmdName] = handler;
+    protected bool HasAnyChildError()
+    {
+        var cache = _cMsCache;
+        for (int i = 0; i < cache.Length; i++)
+        {
+            if (cache[i].HasAnyError)
+                return true;
+        }
+        return false;
+    }
+    protected void RaiseAlarm(EventBase eventbase, params object[] args)
+    {
+        if (eventbase.Severity == SeverityLevel.Info) return;
+
+        if (!_activeAlarms.ContainsKey(eventbase.EventId))
+        {
+            var guid = Guid.NewGuid();
+            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
+            _eventProducer.RaiseAlarm(Name, guid, eventbase, args);
+        }
+
+        if (eventbase.Severity == SeverityLevel.Error && State != EMState.Error)
+        {
+            OnAbort();
+            ChangeState(EMState.Error);
+        }
+    }
+    protected void RaiseInfo(EventBase eventbase, params object[] args)
+    {
+        if (eventbase.Severity != SeverityLevel.Info) return;
+        _eventProducer.SendInfo(Name, eventbase, args);
+    }
+    protected void ChangeState(EMState newState)
+    {
+        if (State == newState) return;
+        State = newState;
+    }
+    protected void TryClearAlarm(EventBase eventbase)
+    {
+        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
+        {
+            _eventProducer.ClearAlarm(Name, alarm.guid, alarm.eventBase, alarm.args);
+        }
+    }
 
 
     // ==========================================
     // 私有成员
     // ==========================================
     private int _step = 0;
-    private long _currentTimestampMs;
     private long _stepStartTimestamp;
     private bool _stepChangedPending = true;
-    private readonly EquipmentModuleCfg _cfg = cfg;
+    private readonly IEventProducer _eventProducer = eventProducer;
     private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private readonly ILogger<S88EquipmentModuleBase> _logger = logger;
     private volatile IControlModule[] _cMsCache = Array.Empty<IControlModule>();
     private readonly ConcurrentDictionary<string, IControlModule> _cMs = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
+    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
     private void PurgeCommands()
     {
         while (_commandQueue.TryDequeue(out var cmd))
@@ -163,13 +221,11 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
 public class EquipmentModuleCfg
 {
     public required string Name { get; init; }
-    public required Func<uint> ReadSafetyDeviceState { get; init; }
 }
 
 public enum EMState
 {
     Idle,
     Busy,
-    Done,
-    Fault
+    Error
 }

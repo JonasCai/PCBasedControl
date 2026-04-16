@@ -29,6 +29,7 @@ public enum Command
     ResetStatistics,
     Retract,
     SetFlow,
+    SetLidAction,
     SetMode,
     SetPID,
     SetTorque,

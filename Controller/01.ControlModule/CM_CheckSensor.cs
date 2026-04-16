@@ -389,3 +389,15 @@ public static class CheckSensorEvents
     public static readonly EventBase WarningShouldBeOn = new() { EventId = 540, Severity = SeverityLevel.Warning, MessageTemplate = "传感器意外断开警告 (超时: {0}ms)" };
     public static readonly EventBase WarningShouldBeOff = new() { EventId = 541, Severity = SeverityLevel.Warning, MessageTemplate = "传感器意外闭合警告 (超时: {0}ms)" };
 }
+
+public interface ICheckSensorFactory
+{
+    CM_CheckSensor Create(CheckSensorCfg cfg);
+}
+
+public class CheckSensorFactory : ICheckSensorFactory
+{
+    private readonly IServiceProvider _sp;
+    public CheckSensorFactory(IServiceProvider sp) => _sp = sp;
+    public CM_CheckSensor Create(CheckSensorCfg cfg) => ActivatorUtilities.CreateInstance<CM_CheckSensor>(_sp, cfg);
+}
