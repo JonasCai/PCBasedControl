@@ -140,27 +140,27 @@ public class CM_Servo : IControlModule
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomingStarted);
     }
 
-    public void MoveAbs(double targetPos, double speed, double tacc, double tdec)
+    public void MoveAbs(double targetPos, double speed, double taccdec)
     {
         if (!CheckBeforeMove(targetPos)) return;
         if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed, tacc, tdec);
+        _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed, taccdec);
 
         _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingAbs);
         _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveAbsStarted, targetPos, speed);
     }
 
-    public void MoveRel(double distance, double speed, double tacc, double tdec)
+    public void MoveRel(double distance, double speed, double taccdec)
     {
         double expectedTarget = _axisStatus.ActPos + distance;
         if (!CheckBeforeMove(expectedTarget)) return;
         if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
 
         _isStopCommandSent = false;
-        _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed, tacc, tdec);
+        _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed, taccdec);
 
         _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingRel);
@@ -444,10 +444,9 @@ public class CM_Servo : IControlModule
         {
             if (cmd.Params.TryGetValue("Target", out var tStr) && double.TryParse(tStr, out var target) &&
                 cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
-                cmd.Params.TryGetValue("Tacc", out var accStr) && double.TryParse(accStr, out var tacc) &&
-                cmd.Params.TryGetValue("Tdec", out var decStr) && double.TryParse(decStr, out var tdec))
+                cmd.Params.TryGetValue("Taccdec", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
             {
-                MoveAbs(target, speed, tacc, tdec);
+                MoveAbs(target, speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Target 或 Speed 参数"));
@@ -457,10 +456,9 @@ public class CM_Servo : IControlModule
         {
             if (cmd.Params.TryGetValue("Distance", out var dStr) && double.TryParse(dStr, out var dist) &&
                 cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
-                cmd.Params.TryGetValue("Tacc", out var accStr) && double.TryParse(accStr, out var tacc) &&
-                cmd.Params.TryGetValue("Tdec", out var decStr) && double.TryParse(decStr, out var tdec))
+                cmd.Params.TryGetValue("Taccdec", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
             {
-                MoveRel(dist, speed, tacc, tdec);
+                MoveRel(dist, speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Distance 或 Speed 参数"));
@@ -469,7 +467,7 @@ public class CM_Servo : IControlModule
         _commandHandlers[Command.MoveVelocity] = cmd =>
         {
             if (cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
-                cmd.Params.TryGetValue("Tacc", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
+                cmd.Params.TryGetValue("Taccdec", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
             {
                 MoveVelocity(speed, taccdec);
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
@@ -558,8 +556,8 @@ public class ServoCfg
     public required Action<ushort, bool> ActuateEnable { get; init; }
     public required Action<ushort, bool> ActuateStop { get; init; }
     public required Action<ushort, ushort> ActuateHome { get; init; }
-    public required Action<ushort, double, double,double,double> ActuateMoveAbs { get; init; }
-    public required Action<ushort, double, double, double, double> ActuateMoveRel { get; init; }
+    public required Action<ushort, double, double, double> ActuateMoveAbs { get; init; }
+    public required Action<ushort, double, double, double> ActuateMoveRel { get; init; }
     public required Action<ushort, double, double> ActuateVelocity { get; init; }
     public required Action<ushort, double, double> ChangeVelocity { get; init; }
     public required Action<ushort, double> ActuateTorque { get; init; }

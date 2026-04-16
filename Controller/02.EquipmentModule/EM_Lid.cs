@@ -210,7 +210,7 @@ public class EM_Lid : S88EquipmentModuleBase
                     _retainData.TryGetValue("EM_Lid.OpenVel", out double openVel) &&
                     _retainData.TryGetValue("EM_Lid.Taccdec", out double taccdec))
                 {
-                    LidAxis.MoveAbs(openPos, openVel, taccdec, taccdec);
+                    LidAxis.MoveAbs(openPos, openVel, taccdec);
                     Step = 10;
                 }
                 else
@@ -307,7 +307,7 @@ public class EM_Lid : S88EquipmentModuleBase
                         _retainData.TryGetValue("EM_Lid.CloseVel", out double closeVel) &&
                         _retainData.TryGetValue("EM_Lid.Taccdec", out double taccdec))
                     {
-                        LidAxis.MoveAbs(closePos, closeVel, taccdec, taccdec);
+                        LidAxis.MoveAbs(closePos, closeVel, taccdec);
                         Step = 40;
                     }
                     else
@@ -475,8 +475,8 @@ public class EM_Lid : S88EquipmentModuleBase
         Action<ushort, bool> actuateEnable,
         Action<ushort, bool> actuateStop,
         Action<ushort, ushort> actuateHome,
-        Action<ushort, double, double, double, double> moveAbs,
-        Action<ushort, double, double, double, double> moveRel,
+        Action<ushort, double, double, double> moveAbs,
+        Action<ushort, double, double, double> moveRel,
         Action<ushort, double, double> moveVel,
         Action<ushort, double, double> changeVel,
         Action<ushort, double> setTorque,
@@ -550,14 +550,14 @@ public class EM_Lid : S88EquipmentModuleBase
                 LTDMC.nmc_set_home_profile(0, axisId, homeMode, 10, 20, 1.0, 1.0, 0);
                 LTDMC.nmc_home_move(0, axisId);
             },
-            moveAbs: (axisId, dist, vel, tacc, tdec) =>
+            moveAbs: (axisId, dist, vel, taccdec) =>
             {
-                LTDMC.dmc_set_profile_unit(0, axisId, 0, vel, tacc, tdec, 2000); //设置单轴运动速度曲线
+                LTDMC.dmc_set_profile_unit(0, axisId, 0, vel, taccdec, taccdec, 2000); //设置单轴运动速度曲线
                 LTDMC.dmc_pmove_unit(0, axisId, dist, 1);
             },
-            moveRel: (axisId, dist, vel, tacc, tdec) =>
+            moveRel: (axisId, dist, vel, taccdec) =>
             {
-                LTDMC.dmc_set_profile_unit(0, axisId, 0, vel, tacc, tdec, 2000); //设置单轴运动速度曲线
+                LTDMC.dmc_set_profile_unit(0, axisId, 0, vel, taccdec, taccdec, 2000); //设置单轴运动速度曲线
                 LTDMC.dmc_pmove_unit(0, axisId, dist, 0);
             },
             moveVel: (axisId, vel, taccdec) =>
