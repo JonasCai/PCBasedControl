@@ -45,8 +45,7 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
 
             OnExecute();
 
-            if (State == EMState.Busy)
-                OnExecute();
+            OnExecute();
 
             var cache = _cMsCache; // ¶ÁÈ¡ volatile ÒýÓÃ
             for (int i = 0; i < cache.Length; i++)

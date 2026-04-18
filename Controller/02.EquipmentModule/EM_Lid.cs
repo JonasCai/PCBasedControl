@@ -82,7 +82,7 @@ public class EM_Lid : S88EquipmentModuleBase
         }
 
         // 底层 CM 发生 Error 必须拉停 EM
-        if (State == EMState.Busy && HasAnyChildError())
+        if (HasAnyChildError())
         {
             AlarmState.ChildModuleFault = true;
         }
@@ -122,10 +122,6 @@ public class EM_Lid : S88EquipmentModuleBase
         Locked2_Detect.DisableMonitoring();
         Unlocked1_Detect.DisableMonitoring();
         Unlocked2_Detect.DisableMonitoring();
-        Pin1Inserted_Detect.DisableMonitoring();
-        Pin2Inserted_Detect.DisableMonitoring();
-        Pin1Retracted_Detect.DisableMonitoring();
-        Pin2Retracted_Detect.DisableMonitoring();
 
         // 重置动作选择，强制要求 HMI 重新下发
         _selectedAction = LidAction.None;
