@@ -15,13 +15,13 @@ public class EM_Lid : S88EquipmentModuleBase
     private float _chamberPressure = 0f;
     private LidAction _selectedAction = LidAction.None;
 
-    public EM_Lid(LidCfg cfg, ILogger<S88EquipmentModuleBase> logger,
+    public EM_Lid(LidCfg cfg, ILogger<EM_Lid> logger,
         IONodes iONodes,
         IRetainDataService retainData,
         IEventProducer eventProducer,
         IServoFactory servoFactory,
         ICylinderFactory cylinderFactory,
-        ICheckSensorFactory checkSensorFactory) : base(cfg.Name, logger, eventProducer)
+        ICheckSensorFactory checkSensorFactory) : base(cfg.Name, eventProducer, logger)
     {
         _cfg = cfg;
         _retainData = retainData;
@@ -396,29 +396,6 @@ public class EM_Lid : S88EquipmentModuleBase
     private CM_CheckSensor Pin1Retracted_Detect = null!;
     private CM_CheckSensor Pin2Inserted_Detect = null!;
     private CM_CheckSensor Pin2Retracted_Detect = null!;
-    private CM_CheckSensor RegisterCheckSensor(
-        string name,
-        ICheckSensorFactory factory,
-        Func<bool> readSignal,
-        long debounceTimeMs = 100,
-        long defaultTimeoutMs = 2000,
-        bool autoStart = false,
-        ExpectedSignalState defaultExpectedSignalState = ExpectedSignalState.Ignore)
-    {
-        var cfg = new CheckSensorCfg
-        {
-            Name = name,
-            ReadRawSignal = readSignal,
-            DebounceTimeMs = debounceTimeMs,
-            DefaultExpectedState = defaultExpectedSignalState,
-            DefaultMismatchTimeoutMs = defaultTimeoutMs,
-            AutoStartMonitoring = autoStart
-        };
-        var sensor = factory.Create(cfg);
-        RegisterCm(sensor);
-        return sensor;
-    }
-
     private void RegisterCheckSensors(IONodes iONodes, ICheckSensorFactory checkSensorFactory)
     {
         Closed1_Detect = RegisterCheckSensor("Closed1_Detect", checkSensorFactory,
@@ -461,50 +438,6 @@ public class EM_Lid : S88EquipmentModuleBase
 
     #region Servo
     private CM_Servo LidAxis = null!;
-    private CM_Servo RegisterServo(
-        string name,
-        IServoFactory factory,
-        ushort axisId, ushort homeMode,
-        double softLimitPos, double softLimitNeg,
-        Func<ushort, AxisStatus> readAxisStatus,
-        Action<ushort> clearAxisError,
-        Action<ushort, bool> actuateEnable,
-        Action<ushort, bool> actuateStop,
-        Action<ushort, ushort> actuateHome,
-        Action<ushort, double, double, double> moveAbs,
-        Action<ushort, double, double, double> moveRel,
-        Action<ushort, double, double> moveVel,
-        Action<ushort, double, double> changeVel,
-        Action<ushort, double> setTorque,
-        Action<ushort, double> changeTorque,
-        Func<bool>? canMove = null)
-    {
-        var cfg = new ServoCfg
-        {
-            Name = name,
-            AxisId = axisId,
-            HomeMode = homeMode,
-            SoftLimitPositive = softLimitPos,
-            SoftLimitNegative = softLimitNeg,
-            ReadAxisStatus = readAxisStatus,
-            ClearAxisError = clearAxisError,
-            ActuateEnable = actuateEnable,
-            ActuateStop = actuateStop,
-            ActuateHome = actuateHome,
-            ActuateMoveAbs = moveAbs,
-            ActuateMoveRel = moveRel,
-            ActuateVelocity = moveVel,
-            ChangeVelocity = changeVel,
-            ActuateTorque = setTorque,
-            ChangeTorque = changeTorque,
-            CanMove = canMove ?? (() => true)
-        };
-
-        var servo = factory.Create(cfg);
-        RegisterCm(servo);
-        return servo;
-    }
-
     private void RegisterServos(IONodes iONodes, IServoFactory servoFactory)
     {
         LidAxis = RegisterServo("LidAxis", servoFactory,
@@ -574,34 +507,6 @@ public class EM_Lid : S88EquipmentModuleBase
 
     #region Cylinder
     private CM_Cylinder LidClamper = null!;
-
-    private CM_Cylinder RegisterCylinder(
-        string name,
-        ICylinderFactory factory,
-        Action<CylinderCmd> actuate,
-        CylinderSensorConfig sensorConfig = CylinderSensorConfig.DualSensors, // 虚拟传感器配置
-        Func<bool>? readExtSensor = null,
-        Func<bool>? readRetSensor = null,
-        int virtualSensorDelayMs = 2000, // 虚拟传感器推算时间
-        Func<bool>? canExtend = null,
-        Func<bool>? canRetract = null)
-    {
-        var cfg = new CylinderCfg
-        {
-            Name = name,
-            SensorConfig = sensorConfig,
-            VirtualExtendDelayMs = virtualSensorDelayMs,
-            Actuate = actuate,
-            ReadExtendedSensor = readExtSensor,
-            ReadRetractedSensor = readRetSensor,
-            CanExtend = canExtend ?? (() => true),
-            CanRetract = canRetract ?? (() => true)
-        };
-        var cylinder = factory.Create(cfg);
-        RegisterCm(cylinder);
-        return cylinder;
-    }
-
     private void RegisterCylinders(IONodes iONodes, ICylinderFactory cylinderFactory)
     {
         LidClamper = RegisterCylinder("LidClamper", cylinderFactory,

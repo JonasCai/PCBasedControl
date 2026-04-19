@@ -11,13 +11,11 @@ using System.Linq;
 namespace Controller._01.ControlModule;
 
 
-public class CM_CheckSensor : IControlModule
+public class CM_CheckSensor : S88ControlModuleBase
 {
-    public CM_CheckSensor(IEventProducer eventProducer, CheckSensorCfg cfg, ILogger<CM_CheckSensor> logger)
+    public CM_CheckSensor(IEventProducer eventProducer, CheckSensorCfg cfg, ILogger<CM_CheckSensor> logger) : base(cfg.Name, eventProducer, logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         RegisterCommandHandlers();
 
         // 初始化防抖器
@@ -36,11 +34,9 @@ public class CM_CheckSensor : IControlModule
     // ==========================================
     // IControlModule 接口方法
     // ==========================================
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public bool HasAnyError => State == CheckSensorState.Error;
-    public string Name => _cfg.Name;
-
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override bool HasAnyError => State == CheckSensorState.Error;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -67,14 +63,11 @@ public class CM_CheckSensor : IControlModule
                 break;
         }
     }
-
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         DisableMonitoring();
     }
-
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
     // 外部控制接口
@@ -108,7 +101,7 @@ public class CM_CheckSensor : IControlModule
         if (_expectedState != ExpectedSignalState.Ignore)
         {
             ChangeState(CheckSensorState.Monitoring);
-            _eventProducer.SendInfo(_cfg.Name, CheckSensorEvents.InfoMonitoringStarted,
+            RaiseInfo(CheckSensorEvents.InfoMonitoringStarted,
                 _expectedState.ToString(), _currentTimeoutMs, _currentSeverity.ToString());
         }
         else
@@ -132,7 +125,7 @@ public class CM_CheckSensor : IControlModule
         AlarmState.ShouldBeOnWarning = false;
         AlarmState.ShouldBeOffWarning = false;
 
-        _eventProducer.SendInfo(_cfg.Name, CheckSensorEvents.InfoMonitoringDisabled);
+        RaiseInfo(CheckSensorEvents.InfoMonitoringDisabled);
     }
 
     public CheckSensorSnapshot GetSnapshot() => new()
@@ -151,12 +144,8 @@ public class CM_CheckSensor : IControlModule
     // ==========================================
     // 私有成员与核心逻辑
     // ==========================================
-    private readonly ILogger<CM_CheckSensor> _logger;
     private readonly CheckSensorCfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
 
     private DigitalDebouncer _debouncer;
     private long _currentTimestampMs;
@@ -258,25 +247,12 @@ public class CM_CheckSensor : IControlModule
         }
     }
 
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(CheckSensorState.Error);
-    }
-
-    private void TryClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
     }
 
     private void Reset()
@@ -289,40 +265,17 @@ public class CM_CheckSensor : IControlModule
         if (!AlarmState.HasAnyError)
         {
             ChangeState(CheckSensorState.Monitoring);
-            _eventProducer.SendInfo(_cfg.Name, CheckSensorEvents.InfoReset);
+            RaiseInfo(CheckSensorEvents.InfoReset);
         }
-    }
-
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested) continue;
-
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd);
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "指令未定义"));
-            }
-        }
-    }
-
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "系统强制清理"));
     }
 
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
     }
 }
 

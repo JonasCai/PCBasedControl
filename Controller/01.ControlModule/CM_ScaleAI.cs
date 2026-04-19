@@ -9,13 +9,11 @@ using System.Linq;
 
 namespace Controller._01.ControlModule;
 
-public class CM_ScaleAI : IControlModule
+public class CM_ScaleAI : S88ControlModuleBase
 {
-    public CM_ScaleAI(IEventProducer eventProducer, ScaleAICfg cfg, IRetainDataService retainDataService , ILogger<CM_ScaleAI> logger)
+    public CM_ScaleAI(ScaleAICfg cfg, IEventProducer eventProducer, IRetainDataService retainDataService , ILogger<CM_ScaleAI> logger) : base(cfg.Name, eventProducer, logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         _retainDataService = retainDataService;
 
         RegisterCommandHandlers();
@@ -31,12 +29,11 @@ public class CM_ScaleAI : IControlModule
     }
 
     // ==========================================
-    // IControlModule 接口方法
+    // ...
     // ==========================================
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public bool HasAnyError => State == ScaleAIState.Error;
-    public string Name => _cfg.Name;
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override bool HasAnyError => State == ScaleAIState.Error;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -76,13 +73,12 @@ public class CM_ScaleAI : IControlModule
                 break;
         }
     }
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         // 对于模拟量读取模块，ToSafe 通常意味着停止超限报警监控，避免滋扰
         DisableAlarms();
     }
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
     // 外部接口
@@ -95,7 +91,7 @@ public class CM_ScaleAI : IControlModule
     {
         if (State == ScaleAIState.Error || State == ScaleAIState.Active) return;
         ChangeState(ScaleAIState.Active);
-        _eventProducer.SendInfo(_cfg.Name, ScaleAIEvents.InfoAlarmsEnabled);
+        RaiseInfo(ScaleAIEvents.InfoAlarmsEnabled);
     }
     public void DisableAlarms()
     {
@@ -109,7 +105,7 @@ public class CM_ScaleAI : IControlModule
         AlarmState.HighWarning = false;
         AlarmState.LowWarning = false;
 
-        _eventProducer.SendInfo(_cfg.Name, ScaleAIEvents.InfoAlarmsDisabled);
+        RaiseInfo(ScaleAIEvents.InfoAlarmsDisabled);
     }
     public void UpdateLimits(float? hh = null, float? h = null, float? l = null, float? ll = null)
     {
@@ -134,7 +130,7 @@ public class CM_ScaleAI : IControlModule
             _retainDataService.SetValue($"{Name}.LL", ll.Value);
         }
 
-        _eventProducer.SendInfo(_cfg.Name, ScaleAIEvents.InfoLimitsUpdated,
+        RaiseInfo(ScaleAIEvents.InfoLimitsUpdated,
             _highHighLimit, _highLimit, _lowLimit, _lowLowLimit);
     }
     public ScaleAISnapshot GetSnapshot() => new()
@@ -154,12 +150,7 @@ public class CM_ScaleAI : IControlModule
     // ==========================================
     // 私有成员与核心逻辑
     // ==========================================
-    private readonly ILogger<CM_ScaleAI> _logger;
     private readonly ScaleAICfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private readonly LowPassFilter _filter = new();
     private readonly IRetainDataService _retainDataService;
     private long _currentTimestampMs;
@@ -258,25 +249,12 @@ public class CM_ScaleAI : IControlModule
         }
     }
 
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(ScaleAIState.Error);
-    }
-
-    private void TryClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
     }
 
     private void Reset()
@@ -291,52 +269,29 @@ public class CM_ScaleAI : IControlModule
         {
             // 复位成功，回到监控状态
             ChangeState(ScaleAIState.Active);
-            _eventProducer.SendInfo(_cfg.Name, ScaleAIEvents.InfoReset);
+            RaiseInfo(ScaleAIEvents.InfoReset);
         }
-    }
-
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested) continue;
-
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd);
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "指令未定义"));
-            }
-        }
-    }
-
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "系统强制清理"));
     }
 
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Start] = cmd =>
+        RegisterCommandHandler(Command.Start, cmd =>
         {
             EnableAlarms();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.Stop] = cmd =>
+        RegisterCommandHandler(Command.Stop, cmd =>
         {
             DisableAlarms();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
     }
 }
 

@@ -6,13 +6,11 @@ using System.Collections.Concurrent;
 
 namespace Controller._01.ControlModule;
 
-public class CM_Valve : IControlModule
+public class CM_Valve : S88ControlModuleBase
 {
-    public CM_Valve(IEventProducer eventProducer, ValveCfg cfg, ILogger<CM_Valve> logger)
+    public CM_Valve(ValveCfg cfg, IEventProducer eventProducer, ILogger<CM_Valve> logger) : base(cfg.Name, eventProducer, logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         RegisterCommandHandlers();
 
         //初始化防抖器
@@ -24,13 +22,13 @@ public class CM_Valve : IControlModule
             throw new ArgumentException($"阀[{_cfg.Name}]配置不完整", nameof(_cfg));
     }
 
+
     // ==========================================
-    // IControlModule 接口方法
+    // ...
     // ==========================================
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public bool HasAnyError => State == ValveState.Error;
-    public string Name => _cfg.Name;
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override bool HasAnyError => State == ValveState.Error;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -97,7 +95,7 @@ public class CM_Valve : IControlModule
                 {
                     _openCount++;
                     ChangeState(ValveState.Open);
-                    _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoOpenDone, _toOpenElapsedTime); //伸出到位 (耗时 {ToOpenElapsedTime} ms
+                    RaiseInfo(ValveEvents.InfoOpenDone, _toOpenElapsedTime); //伸出到位 (耗时 {ToOpenElapsedTime} ms
                 }
                 break;
 
@@ -109,7 +107,7 @@ public class CM_Valve : IControlModule
                 {
                     _closeCount++;
                     ChangeState(ValveState.Closed);
-                    _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoClosedDone, _toCloseElapsedTime); //缩回到位 (耗时 {ToCloseElapsedTime} ms
+                    RaiseInfo(ValveEvents.InfoClosedDone, _toCloseElapsedTime); //缩回到位 (耗时 {ToCloseElapsedTime} ms
                 }
                 break;
 
@@ -119,7 +117,7 @@ public class CM_Valve : IControlModule
                 // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
                 if (!_isOpen)
                 {
-                    _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoOpenSensorLost);
+                    RaiseInfo(ValveEvents.InfoOpenSensorLost);
                     ChangeState(ValveState.ToOpenBusy);
                     _toOpenStartTimestampMs = _currentTimestampMs;
                 }
@@ -131,7 +129,7 @@ public class CM_Valve : IControlModule
                 // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
                 if (!_isClosed)
                 {
-                    _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoCloseSensorLost); //缩回位信号丢失，尝试重新检测
+                    RaiseInfo(ValveEvents.InfoCloseSensorLost); //缩回位信号丢失，尝试重新检测
                     ChangeState(ValveState.ToCloseBusy);
                     _toCloseStartTimestampMs = _currentTimestampMs;
                 }
@@ -141,13 +139,12 @@ public class CM_Valve : IControlModule
                 break;
         }
     }
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         _cfg.Actuate(ValveCmd.ToSafe);
         ChangeState(ValveState.Unknown);
     }
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
 
     // ==========================================
@@ -165,7 +162,7 @@ public class CM_Valve : IControlModule
             return;
         }
 
-        _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoCmdClose);//收到缩回指令，开始执行...
+        RaiseInfo(ValveEvents.InfoCmdClose);//收到缩回指令，开始执行...
         ChangeState(ValveState.ToCloseBusy);
         _toCloseStartTimestampMs = _currentTimestampMs;
     }
@@ -181,7 +178,7 @@ public class CM_Valve : IControlModule
             return;
         }
 
-        _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoCmdOpen);//收到伸出指令，开始执行
+        RaiseInfo(ValveEvents.InfoCmdOpen);//收到伸出指令，开始执行
         ChangeState(ValveState.ToOpenBusy);
         _toOpenStartTimestampMs = _currentTimestampMs;
     }
@@ -206,66 +203,20 @@ public class CM_Valve : IControlModule
     // ==========================================
     // 私有成员
     // ==========================================
-    private readonly ILogger<CM_Valve> _logger;
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
     private long _toOpenStartTimestampMs, _toCloseStartTimestampMs, _currentTimestampMs, _toCloseElapsedTime, _toOpenElapsedTime;
     private readonly ValveCfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private DigitalDebouncer _openSensorFilter, _closeSensorFilter;
     private int _openCount, _closeCount;
     private bool _isOpen, _isClosed, _rawOpen, _rawClosed, _physicalOpen, _physicalClosed;
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(ValveState.Error);
 
     }
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            // 死亡确认
-            if (cmd.CancelToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-                continue;
-            }
 
-            // 查表执行
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd); // 执行绑定的动作
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
-            }
-        }
-
-    }
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd?.CallbackTcs != null)
-            {
-                cmd.CallbackTcs.TrySetResult(new CommandResult(
-                    CommandResultType.Rejected,
-                    "指令被系统强制清理，未执行"
-                ));
-                _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-            }
-        }
-    }
     private void Reset()
     {
         if (State != ValveState.Error) return;
@@ -299,42 +250,34 @@ public class CM_Valve : IControlModule
         if (!AlarmState.HasAnyError)
         {
             ChangeState(ValveState.Unknown);
-            _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoReset);
+            RaiseInfo(ValveEvents.InfoReset);
         }
     }
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Open] = cmd =>
+        RegisterCommandHandler(Command.Open, cmd =>
         {
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
             MoveOpen();
-        };
+        });
 
-        _commandHandlers[Command.Close] = cmd =>
+        RegisterCommandHandler(Command.Close, cmd =>
         {
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
             MoveClose();
-        };
+        });
 
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
             Reset();
-        };
+        });
 
-        _commandHandlers[Command.ResetStatistics] = cmd =>
+        RegisterCommandHandler(Command.ResetStatistics, cmd =>
         {
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
             ResetStatistics();
-        };
-
-    }
-    private void TryClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
+        });
     }
     private void EvaluateAlarms(bool isOpen, bool isClosed)
     {
@@ -435,7 +378,7 @@ public class CM_Valve : IControlModule
     {
         _openCount = 0;
         _closeCount = 0;
-        _eventProducer.SendInfo(_cfg.Name, ValveEvents.InfoClearStats); //动作次数累计清零
+        RaiseInfo(ValveEvents.InfoClearStats); //动作次数累计清零
     }
 }
 

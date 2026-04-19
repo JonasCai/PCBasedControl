@@ -7,20 +7,21 @@ using System.Runtime.InteropServices;
 
 namespace Controller.S88;
 
-public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentModuleBase> logger, IEventProducer eventProducer) : IEquipmentModule
+public abstract class S88EquipmentModuleBase : S88ObjectBase
 {
+    public S88EquipmentModuleBase(string name, IEventProducer eventProducer, ILogger logger) : base(name, eventProducer, logger) {}
+
     // ==========================================
-    // IEquipmentModule 接口方法
+    // ...
     // ==========================================
-    public string Name => name;
-    public bool HasAnyWarning => false;
-    public bool HasAnyError => State == EMState.Error;
+    public override bool HasAnyWarning => false;
+    public override bool HasAnyError => State == EMState.Error;
     public EMState State { get; private set; } = EMState.Idle;
-    public void ExecuteCommand(InternalCommand command)
+    public override void ExecuteCommand(InternalCommand command)
     {
         if (command.TargetObject == Name)
         {
-            _commandQueue.Enqueue(command);
+            base.ExecuteCommand(command);
             return;
         }
 
@@ -32,7 +33,7 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
 
         command.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令目标未知：{command.TargetUnit}.{command.TargetObject}"));
     }
-    public void Refresh(long currentTimestampMs)
+    public override void Refresh(long currentTimestampMs)
     {
         CurrentTimestampMs = currentTimestampMs;
 
@@ -42,8 +43,6 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
         try
         {
             ProcessCommandQueue();
-
-            OnExecute();
 
             OnExecute();
 
@@ -61,12 +60,12 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
             {
                 OnAbort(); 
                 ChangeState(EMState.Error);
-                _logger.LogError(ex, "EM [{Name}] 发生内部未知异常，强制进入 Error 状态", Name);
+                LogError(ex, "EM [{Name}] 发生内部未知异常，强制进入 Error 状态", Name);
             }
             ToSafe();
         }
     }
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         ChangeState(EMState.Idle);
@@ -74,7 +73,7 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
         for (int i = 0; i < cache.Length; i++)
             cache[i].ToSafe();
     }
-    public bool TryGetCm(string name, out IControlModule? cm) => _cMs.TryGetValue(name, out cm);
+    public bool TryGetCm(string name, out S88ControlModuleBase? cm) => _cMs.TryGetValue(name, out cm);
 
 
     // ==========================================
@@ -114,12 +113,11 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
         }
     }
     protected bool StepTimeout(long ms) => StepTime > ms;
-    protected void RegisterCm(IControlModule cm)
+    protected void RegisterCm(S88ControlModuleBase cm)
     {
         if (_cMs.TryAdd(cm.Name, cm))
             _cMsCache = _cMs.Values.ToArray();
     }
-    protected void RegisterCommandHandler(Command cmdName, Action<InternalCommand> handler) => _commandHandlers[cmdName] = handler;
     protected bool HasAnyChildError()
     {
         var cache = _cMsCache;
@@ -130,16 +128,9 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
         }
         return false;
     }
-    protected void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (eventbase.Severity == SeverityLevel.Info) return;
-
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error && State != EMState.Error)
         {
@@ -147,24 +138,104 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
             ChangeState(EMState.Error);
         }
     }
-    protected void RaiseInfo(EventBase eventbase, params object[] args)
-    {
-        if (eventbase.Severity != SeverityLevel.Info) return;
-        _eventProducer.SendInfo(Name, eventbase, args);
-    }
     protected void ChangeState(EMState newState)
     {
         if (State == newState) return;
         State = newState;
     }
-    protected void TryClearAlarm(EventBase eventbase)
+    protected CM_Cylinder RegisterCylinder(
+        string name,
+        ICylinderFactory factory,
+        Action<CylinderCmd> actuate,
+        CylinderSensorConfig sensorConfig = CylinderSensorConfig.DualSensors, // 虚拟传感器配置
+        Func<bool>? readExtSensor = null,
+        Func<bool>? readRetSensor = null,
+        int virtualSensorDelayMs = 2000, // 虚拟传感器推算时间
+        Func<bool>? canExtend = null,
+        Func<bool>? canRetract = null)
     {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
+        var cfg = new CylinderCfg
         {
-            _eventProducer.ClearAlarm(Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
+            Name = name,
+            SensorConfig = sensorConfig,
+            VirtualExtendDelayMs = virtualSensorDelayMs,
+            Actuate = actuate,
+            ReadExtendedSensor = readExtSensor,
+            ReadRetractedSensor = readRetSensor,
+            CanExtend = canExtend ?? (() => true),
+            CanRetract = canRetract ?? (() => true)
+        };
+        var cylinder = factory.Create(cfg);
+        RegisterCm(cylinder);
+        return cylinder;
     }
 
+    protected CM_Servo RegisterServo(
+        string name,
+        IServoFactory factory,
+        ushort axisId, ushort homeMode,
+        double softLimitPos, double softLimitNeg,
+        Func<ushort, AxisStatus> readAxisStatus,
+        Action<ushort> clearAxisError,
+        Action<ushort, bool> actuateEnable,
+        Action<ushort, bool> actuateStop,
+        Action<ushort, ushort> actuateHome,
+        Action<ushort, double, double, double> moveAbs,
+        Action<ushort, double, double, double> moveRel,
+        Action<ushort, double, double> moveVel,
+        Action<ushort, double, double> changeVel,
+        Action<ushort, double> setTorque,
+        Action<ushort, double> changeTorque,
+        Func<bool>? canMove = null)
+    {
+        var cfg = new ServoCfg
+        {
+            Name = name,
+            AxisId = axisId,
+            HomeMode = homeMode,
+            SoftLimitPositive = softLimitPos,
+            SoftLimitNegative = softLimitNeg,
+            ReadAxisStatus = readAxisStatus,
+            ClearAxisError = clearAxisError,
+            ActuateEnable = actuateEnable,
+            ActuateStop = actuateStop,
+            ActuateHome = actuateHome,
+            ActuateMoveAbs = moveAbs,
+            ActuateMoveRel = moveRel,
+            ActuateVelocity = moveVel,
+            ChangeVelocity = changeVel,
+            ActuateTorque = setTorque,
+            ChangeTorque = changeTorque,
+            CanMove = canMove ?? (() => true)
+        };
+
+        var servo = factory.Create(cfg);
+        RegisterCm(servo);
+        return servo;
+    }
+
+    protected CM_CheckSensor RegisterCheckSensor(
+        string name,
+        ICheckSensorFactory factory,
+        Func<bool> readSignal,
+        long debounceTimeMs = 100,
+        long defaultTimeoutMs = 2000,
+        bool autoStart = false,
+        ExpectedSignalState defaultExpectedSignalState = ExpectedSignalState.Ignore)
+    {
+        var cfg = new CheckSensorCfg
+        {
+            Name = name,
+            ReadRawSignal = readSignal,
+            DebounceTimeMs = debounceTimeMs,
+            DefaultExpectedState = defaultExpectedSignalState,
+            DefaultMismatchTimeoutMs = defaultTimeoutMs,
+            AutoStartMonitoring = autoStart
+        };
+        var sensor = factory.Create(cfg);
+        RegisterCm(sensor);
+        return sensor;
+    }
 
     // ==========================================
     // 私有成员
@@ -172,49 +243,9 @@ public abstract class S88EquipmentModuleBase(string name, ILogger<S88EquipmentMo
     private int _step = 0;
     private long _stepStartTimestamp;
     private bool _stepChangedPending = true;
-    private readonly IEventProducer _eventProducer = eventProducer;
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
-    private readonly ILogger<S88EquipmentModuleBase> _logger = logger;
-    private volatile IControlModule[] _cMsCache = Array.Empty<IControlModule>();
-    private readonly ConcurrentDictionary<string, IControlModule> _cMs = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd?.CallbackTcs != null)
-            {
-                cmd.CallbackTcs.TrySetResult(new CommandResult(
-                    CommandResultType.Rejected,
-                    "指令被系统强制清理，未执行"
-                ));
-                _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-            }
-        }
-    }
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-                continue;
-            }
+    private volatile S88ControlModuleBase[] _cMsCache = Array.Empty<S88ControlModuleBase>();
+    private readonly Dictionary<string, S88ControlModuleBase> _cMs = new(StringComparer.OrdinalIgnoreCase);
 
-            // 查表执行
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd); // 执行绑定的动作
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
-            }
-        }
-
-    }
 }
 
 public class EquipmentModuleCfg

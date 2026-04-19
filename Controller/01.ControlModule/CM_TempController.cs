@@ -6,13 +6,11 @@ using System.Collections.Concurrent;
 
 namespace Controller._01.ControlModule;
 
-public class CM_TempController : IControlModule
+public class CM_TempController : S88ControlModuleBase
 {
-    public CM_TempController(IEventProducer eventProducer, TempControllerCfg cfg, ILogger<CM_TempController> logger)
+    public CM_TempController(TempControllerCfg cfg, IEventProducer eventProducer, ILogger<CM_TempController> logger) : base(cfg.Name, eventProducer, logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         _timeProportioning = new(TimeSpan.FromMilliseconds(_cfg.TimeProportioningCTMs), Environment.TickCount64);
 
         _pid.DeadBand = _cfg.PidDeadBand;
@@ -29,10 +27,9 @@ public class CM_TempController : IControlModule
     // ==========================================
     // IControlModule 接口方法
     // ==========================================
-    public string Name => _cfg.Name;
-    public bool HasAnyError => State == TempControllerState.Error;
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyError => State == TempControllerState.Error;
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -106,14 +103,13 @@ public class CM_TempController : IControlModule
         _lastPidOutputPercent = _thisPidOutputPercent;
 
     }
-    public void ToSafe()
+    public override void ToSafe()
     {
         Stop();
         PurgeCommands();
         _cfg.SetHeaterOn?.Invoke(false);
         _cfg.SetDutyRatio?.Invoke(0f);
     }
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
     // 外部接口 / 状态查询
@@ -131,7 +127,7 @@ public class CM_TempController : IControlModule
             {
                 var oldValue = _pid.Setpoint;
                 _pid.Setpoint = value;
-                _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidSPChanged, oldValue, value);
+                RaiseInfo(TempControllerEvents.InfoPidSPChanged, oldValue, value);
             }
         }
     }
@@ -145,7 +141,7 @@ public class CM_TempController : IControlModule
             {
                 var oldValue = _manualOutputPercent;
                 _manualOutputPercent = value;
-                _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidManualOutputChanged, oldValue, newValue);
+                RaiseInfo(TempControllerEvents.InfoPidManualOutputChanged, oldValue, newValue);
             }
         }
     }
@@ -157,14 +153,14 @@ public class CM_TempController : IControlModule
         if (sp.HasValue)
             PidSetpoint = sp.Value;
 
-        _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidStart, PidSetpoint);
+        RaiseInfo(TempControllerEvents.InfoPidStart, PidSetpoint);
         ChangeState(TempControllerState.NormalPid);
     }
     public void Stop()
     {
         if (State == TempControllerState.Disabled || State == TempControllerState.Error)
             return;
-        _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidStop);
+        RaiseInfo(TempControllerEvents.InfoPidStop);
         ChangeState(TempControllerState.Disabled);
     }
     public void SwitchToNormalPid(float? sp = null)
@@ -201,12 +197,7 @@ public class CM_TempController : IControlModule
     // ==========================================
     // 私有成员与内部类
     // ==========================================
-    private readonly ILogger<CM_TempController> _logger;
     private readonly TempControllerCfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();// 用于追踪报警状态以便能够清除报警
     private readonly TemperaturePidController _pid = new();
     private readonly RelayAutoTuner _autoTuner = new();
     private readonly TimeProportioningOutput _timeProportioning;
@@ -216,36 +207,9 @@ public class CM_TempController : IControlModule
     private long _currentTimestampMs;
     private bool _thisHeaterOn = false;
     private long? _lastPidComputeTimestamMs = null;
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 已失效丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-                continue;
-            }
-
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd);
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"不支持的指令: {cmd.CmdName}"));
-            }
-        }
-    }
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "被系统强制清理"));
-        }
-    }
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Start] = cmd =>
+        RegisterCommandHandler(Command.Start, cmd =>
         {
             if (cmd.Params.Count > 0)
             {
@@ -259,8 +223,8 @@ public class CM_TempController : IControlModule
                 Start();
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
-        _commandHandlers[Command.ChangeSP] = cmd =>
+        });
+        RegisterCommandHandler(Command.ChangeSP, cmd =>
         {
             if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp))
             {
@@ -269,9 +233,9 @@ public class CM_TempController : IControlModule
                 return;
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺少设定值参数"));
-        };
+        });
 
-        _commandHandlers[Command.ChangeManualOutput] = cmd =>
+        RegisterCommandHandler(Command.ChangeManualOutput, cmd =>
         {
             if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var output))
             {
@@ -280,9 +244,9 @@ public class CM_TempController : IControlModule
                 return;
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺少手动输出参数"));
-        };
+        });
 
-        _commandHandlers[Command.SetPID] = cmd =>
+        RegisterCommandHandler(Command.SetPID, cmd =>
         {
             if (cmd.Params.TryGetValue("P", out var p) && cmd.Params.TryGetValue("I", out var i) && cmd.Params.TryGetValue("D", out var d))
             {
@@ -294,21 +258,21 @@ public class CM_TempController : IControlModule
                 }
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "P/I/D参数不完整或者格式错误"));
-        };
+        });
 
-        _commandHandlers[Command.Stop] = cmd =>
+        RegisterCommandHandler(Command.Stop, cmd =>
         {
             Stop();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.SwitchToManual] = cmd =>
+        RegisterCommandHandler(Command.SwitchToManual, cmd =>
         {
             if (cmd.Params.Count > 0)
             {
@@ -322,9 +286,9 @@ public class CM_TempController : IControlModule
                 SwitchToManual();
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.SwitchToNormalPid] = cmd =>
+        RegisterCommandHandler(Command.SwitchToNormalPid, cmd =>
         {
             if (cmd.Params.Count > 0)
             {
@@ -338,9 +302,9 @@ public class CM_TempController : IControlModule
                 SwitchToNormalPid();
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.SwitchToAutoTune] = cmd =>
+        RegisterCommandHandler(Command.SwitchToAutoTune, cmd =>
         {
             if (cmd.Params.Count > 0)
             {
@@ -354,14 +318,14 @@ public class CM_TempController : IControlModule
                 SwitchToAutoTune();
             }
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.StopAutoTune] = cmd =>
+        RegisterCommandHandler(Command.StopAutoTune, cmd =>
         {
             if (State == TempControllerState.AutoTune && _autoTuner.Status == AutoTuneStatus.Running)
                 _autoTuner.Cancel();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
     }
     private void ChangeState(TempControllerState newState)
     {
@@ -400,7 +364,7 @@ public class CM_TempController : IControlModule
         }
         TempControllerState oldState = State;
         State = newState;
-        _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoStateChanged, oldState, newState);
+        RaiseInfo(TempControllerEvents.InfoStateChanged, oldState, newState);
     }
     private void HandleAutoTuneStateAfterUpdate()
     {
@@ -412,7 +376,7 @@ public class CM_TempController : IControlModule
             case AutoTuneStatus.Succeeded:
                 if (_autoTuner.Result?.Success == true)
                 {
-                    _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoAutoTuneSucceed);
+                    RaiseInfo(TempControllerEvents.InfoAutoTuneSucceed);
                     SetPid((float)_autoTuner.Result.Kp, (float)_autoTuner.Result.Ki, (float)_autoTuner.Result.Kd);
                 }
                 SwitchToNormalPid();
@@ -422,29 +386,17 @@ public class CM_TempController : IControlModule
             case AutoTuneStatus.Cancelled:
                 if (_autoTuner.Result?.Success == false)
                 {
-                    _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoAutoTuneFailedOrCanceled, _autoTuner.Result.Message);
+                    RaiseInfo(TempControllerEvents.InfoAutoTuneFailedOrCanceled, _autoTuner.Result.Message);
                 }
                 SwitchToNormalPid();
                 break;
         }
     }
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         ChangeState(TempControllerState.Error);
-    }
-    private void ClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
     }
     private void Reset()
     {
@@ -452,22 +404,22 @@ public class CM_TempController : IControlModule
 
         if (!AlarmState.PVOverLimitError)
         {
-            ClearAlarm(TempControllerEvents.ErrPVOverLimit);
+            TryClearAlarm(TempControllerEvents.ErrPVOverLimit);
         }
 
         if (!AlarmState.HighHighDevError)
         {
-            ClearAlarm(TempControllerEvents.ErrHighHighDev);
+            TryClearAlarm(TempControllerEvents.ErrHighHighDev);
         }
 
         if (!AlarmState.HighDevWarning)
         {
-            ClearAlarm(TempControllerEvents.WarningHighDev);
+            TryClearAlarm(TempControllerEvents.WarningHighDev);
         }
 
         if (!AlarmState.ExecuteConditionsNotMetError)
         {
-            ClearAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
+            TryClearAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
         }
 
         if (!AlarmState.HasAnyError)
@@ -475,7 +427,7 @@ public class CM_TempController : IControlModule
             ChangeState(TempControllerState.Disabled);
         }
 
-        _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidReset);
+        RaiseInfo(TempControllerEvents.InfoPidReset);
     }
     private void SwitchToAutoTune(float? sp = null)
     {
@@ -493,7 +445,7 @@ public class CM_TempController : IControlModule
         _pid.Kp = Kp;
         _pid.Ki = Ki;
         _pid.Kd = Kd;
-        _eventProducer.SendInfo(_cfg.Name, TempControllerEvents.InfoPidParaChanged, oldKp, Kp, oldKi, Ki, oldKd, Kd);
+        RaiseInfo(TempControllerEvents.InfoPidParaChanged, oldKp, Kp, oldKi, Ki, oldKd, Kd);
     }
     private void EvaluateAlarms()
     {
@@ -525,7 +477,7 @@ public class CM_TempController : IControlModule
             else
             {
                 AlarmState.HighDevWarning = false;
-                ClearAlarm(TempControllerEvents.WarningHighDev);//警告类型自动清除
+                TryClearAlarm(TempControllerEvents.WarningHighDev);//警告类型自动清除
             }
         }
         else { PidTargetReached = false; }

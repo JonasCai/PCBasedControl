@@ -5,13 +5,11 @@ using System.Collections.Concurrent;
 
 namespace Controller._01.ControlModule;
 
-public class CM_Servo : IControlModule
+public class CM_Servo : S88ControlModuleBase
 {
-    public CM_Servo(IEventProducer eventProducer, ServoCfg cfg, ILogger<CM_Servo> logger)
+    public CM_Servo(IEventProducer eventProducer, ServoCfg cfg, ILogger<CM_Servo> logger) : base(cfg.Name, eventProducer, logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         RegisterCommandHandlers();
 
         if (!_cfg.Validate())
@@ -21,11 +19,9 @@ public class CM_Servo : IControlModule
     // ==========================================
     // IControlModule 接口方法
     // ==========================================
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public bool HasAnyError => State == ServoState.Error;
-    public string Name => _cfg.Name;
-
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override bool HasAnyError => State == ServoState.Error;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -69,7 +65,7 @@ public class CM_Servo : IControlModule
                 {
                     ChangeState(ServoState.Standby);
                     _isStopCommandSent = false;
-                    _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomeDone);
+                    RaiseInfo(ServoEvents.InfoHomeDone);
                 }
                 break;
 
@@ -82,7 +78,7 @@ public class CM_Servo : IControlModule
                 {
                     ChangeState(ServoState.Standby);
                     _isStopCommandSent = false;
-                    _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveDone, _axisStatus.ActPos);
+                    RaiseInfo(ServoEvents.InfoMoveDone, _axisStatus.ActPos);
                 }
                 break;
 
@@ -96,14 +92,11 @@ public class CM_Servo : IControlModule
                 break;
         }
     }
-
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         Stop(emergency: true);
     }
-
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
     // 外部运动控制接口
@@ -112,7 +105,7 @@ public class CM_Servo : IControlModule
     {
         if (State == ServoState.Error) return;
         _cfg.ActuateEnable(_cfg.AxisId, enable);
-        _eventProducer.SendInfo(_cfg.Name, enable ? ServoEvents.InfoServoEnabled : ServoEvents.InfoServoDisabled);
+        RaiseInfo(enable ? ServoEvents.InfoServoEnabled : ServoEvents.InfoServoDisabled);
     }
 
     public void Stop(bool emergency = false)
@@ -123,7 +116,7 @@ public class CM_Servo : IControlModule
         {
             _cfg.ActuateStop(_cfg.AxisId, emergency);
             _isStopCommandSent = true;
-            _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoStopped, emergency);
+            RaiseInfo(ServoEvents.InfoStopped, emergency);
         }
     }
 
@@ -137,7 +130,7 @@ public class CM_Servo : IControlModule
 
         _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.Homing);
-        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoHomingStarted);
+        RaiseInfo(ServoEvents.InfoHomingStarted);
     }
 
     public void MoveAbs(double targetPos, double speed, double taccdec)
@@ -150,7 +143,7 @@ public class CM_Servo : IControlModule
 
         _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingAbs);
-        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveAbsStarted, targetPos, speed);
+        RaiseInfo(ServoEvents.InfoMoveAbsStarted, targetPos, speed);
     }
 
     public void MoveRel(double distance, double speed, double taccdec)
@@ -164,7 +157,7 @@ public class CM_Servo : IControlModule
 
         _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
         ChangeState(ServoState.MovingRel);
-        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveRelStarted, distance, speed);
+        RaiseInfo(ServoEvents.InfoMoveRelStarted, distance, speed);
     }
 
     public void MoveVelocity(double speed,double taccdec)
@@ -183,7 +176,7 @@ public class CM_Servo : IControlModule
             _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
             ChangeState(ServoState.VelocityMode);
         }
-        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoMoveVelStarted, speed);
+        RaiseInfo(ServoEvents.InfoMoveVelStarted, speed);
     }
 
     public void SetTorque(double torquePercent)
@@ -202,7 +195,7 @@ public class CM_Servo : IControlModule
             _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
             ChangeState(ServoState.TorqueMode);
         }
-        _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoTorqueStarted, torquePercent);
+        RaiseInfo(ServoEvents.InfoTorqueStarted, torquePercent);
     }
 
     // ==========================================
@@ -228,12 +221,8 @@ public class CM_Servo : IControlModule
     // ==========================================
     // 私有成员与报警逻辑
     // ==========================================
-    private readonly ILogger<CM_Servo> _logger;
     private readonly ServoCfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
 
     private long _currentTimestampMs;
     private AxisStatus _axisStatus;
@@ -309,8 +298,7 @@ public class CM_Servo : IControlModule
         if (status.PosLimit_S || status.ActPos > _cfg.SoftLimitPositive)
         {
             AlarmState.SoftLimitPositiveError = true;
-            if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitPositive.EventId))
-                RaiseAlarm(ServoEvents.ErrSoftLimitPositive, status.ActPos, _cfg.SoftLimitPositive);
+            RaiseAlarm(ServoEvents.ErrSoftLimitPositive, status.ActPos, _cfg.SoftLimitPositive);
         }
         else AlarmState.SoftLimitPositiveError = false;
 
@@ -318,8 +306,7 @@ public class CM_Servo : IControlModule
         if (status.NegLimit_S || status.ActPos < _cfg.SoftLimitNegative)
         {
             AlarmState.SoftLimitNegativeError = true;
-            if (State != ServoState.Error && !_activeAlarms.ContainsKey(ServoEvents.ErrSoftLimitNegative.EventId))
-                RaiseAlarm(ServoEvents.ErrSoftLimitNegative, status.ActPos, _cfg.SoftLimitNegative);
+            RaiseAlarm(ServoEvents.ErrSoftLimitNegative, status.ActPos, _cfg.SoftLimitNegative);
         }
         else AlarmState.SoftLimitNegativeError = false;
 
@@ -335,25 +322,12 @@ public class CM_Servo : IControlModule
         else AlarmState.InterlockLost = false;
     }
 
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(ServoState.Error);
-    }
-
-    private void TryClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
     }
 
     private void Reset()
@@ -382,31 +356,8 @@ public class CM_Servo : IControlModule
         {
             _isStopCommandSent = false;
             ChangeState(_axisStatus.ServoOn ? ServoState.Standby : ServoState.Disabled);
-            _eventProducer.SendInfo(_cfg.Name, ServoEvents.InfoReset);
+            RaiseInfo(ServoEvents.InfoReset);
         }
-    }
-
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested) continue;
-
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd);
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "指令未定义"));
-            }
-        }
-    }
-
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "系统强制清理"));
     }
 
     // ==========================================
@@ -414,33 +365,33 @@ public class CM_Servo : IControlModule
     // ==========================================
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.Enable] = cmd =>
+        RegisterCommandHandler(Command.Enable, cmd =>
         {
             bool enable = true;
             if (cmd.Params.TryGetValue("State", out var stateStr)) bool.TryParse(stateStr, out enable);
             EnableServo(enable);
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.Stop] = cmd =>
+        RegisterCommandHandler(Command.Stop, cmd =>
         {
             Stop();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.Home] = cmd =>
+        RegisterCommandHandler(Command.Home, cmd =>
         {
             Home();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
-        };
+        });
 
-        _commandHandlers[Command.MoveAbs] = cmd =>
+        RegisterCommandHandler(Command.MoveAbs, cmd =>
         {
             if (cmd.Params.TryGetValue("Target", out var tStr) && double.TryParse(tStr, out var target) &&
                 cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
@@ -450,9 +401,9 @@ public class CM_Servo : IControlModule
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Target/Speed/Taccdec 参数"));
-        };
+        });
 
-        _commandHandlers[Command.MoveRel] = cmd =>
+        RegisterCommandHandler(Command.MoveRel, cmd =>
         {
             if (cmd.Params.TryGetValue("Distance", out var dStr) && double.TryParse(dStr, out var dist) &&
                 cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
@@ -462,9 +413,9 @@ public class CM_Servo : IControlModule
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Distance/Speed/Taccdec 参数"));
-        };
+        });
 
-        _commandHandlers[Command.MoveVelocity] = cmd =>
+        RegisterCommandHandler(Command.MoveVelocity, cmd =>
         {
             if (cmd.Params.TryGetValue("Speed", out var sStr) && double.TryParse(sStr, out var speed) &&
                 cmd.Params.TryGetValue("Taccdec", out var accdecStr) && double.TryParse(accdecStr, out var taccdec))
@@ -473,9 +424,9 @@ public class CM_Servo : IControlModule
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Speed/Taccdec 参数"));
-        };
+        });
 
-        _commandHandlers[Command.SetTorque] = cmd =>
+        RegisterCommandHandler(Command.SetTorque, cmd =>
         {
             if (cmd.Params.TryGetValue("Torque", out var tqStr) && double.TryParse(tqStr, out var torque))
             {
@@ -483,7 +434,7 @@ public class CM_Servo : IControlModule
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Torque 参数"));
-        };
+        });
     }
 }
 

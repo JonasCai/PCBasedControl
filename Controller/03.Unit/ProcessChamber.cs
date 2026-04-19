@@ -13,7 +13,7 @@ public class ProcessChamber : S88UnitBase
 {
     private readonly RecipeEngine _recipeEngine = new();
 
-    public ProcessChamber(UnitCfg cfg, IEventProducer eventProducer, ILogger<S88UnitBase> logger, IONodes iONodes, IMfcFactory mfcFactory, IValveFactory valveFactory) : base(cfg, eventProducer, logger)
+    public ProcessChamber(string name, IEventProducer eventProducer, ILogger logger, IONodes iONodes, IMfcFactory mfcFactory, IValveFactory valveFactory) : base(name, eventProducer, logger)
     {
         RegisterMembers(iONodes, mfcFactory, valveFactory);
         RegisterCommandHandlers();

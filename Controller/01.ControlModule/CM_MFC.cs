@@ -10,13 +10,11 @@ using System.Text;
 
 namespace Controller._01.ControlModule;
 
-public class CM_MFC : IControlModule
+public class CM_MFC : S88ControlModuleBase
 {
-    public CM_MFC(IEventProducer eventProducer, MfcCfg cfg, ILogger<CM_MFC> logger)
+    public CM_MFC(MfcCfg cfg, IEventProducer eventProducer, ILogger<CM_MFC> logger): base(cfg.Name,eventProducer,logger)
     {
-        _eventProducer = eventProducer;
         _cfg = cfg;
-        _logger = logger;
         RegisterCommandHandlers();
 
         if (!_cfg.Validate())
@@ -26,10 +24,9 @@ public class CM_MFC : IControlModule
     // ==========================================
     // IControlModule 接口方法
     // ==========================================
-    public bool HasAnyWarning => AlarmState.HasAnyWarning;
-    public bool HasAnyError => State == MfcState.Error;
-    public string Name => _cfg.Name;
-    public void Refresh(long currentTimestampMs)
+    public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+    public override bool HasAnyError => State == MfcState.Error;
+    public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
@@ -76,13 +73,12 @@ public class CM_MFC : IControlModule
                 break;
         }
     }
-    public void ToSafe()
+    public override void ToSafe()
     {
         PurgeCommands();
         _cfg.WriteSP(0f);
         ChangeState(MfcState.Unknown);
     }
-    public void ExecuteCommand(InternalCommand command) => _commandQueue.Enqueue(command);
 
     // ==========================================
     // 外部控制接口
@@ -108,11 +104,11 @@ public class CM_MFC : IControlModule
             if (State != MfcState.Controlling)
             {
                 ChangeState(MfcState.Controlling);
-                _eventProducer.SendInfo(_cfg.Name, MfcEvents.InfoFlowStarted, _targetSp);
+                RaiseInfo(MfcEvents.InfoFlowStarted, _targetSp);
             }
             else
             {
-                _eventProducer.SendInfo(_cfg.Name, MfcEvents.InfoSpChanged, _targetSp);
+                RaiseInfo(MfcEvents.InfoSpChanged, _targetSp);
             }
         }
         else
@@ -126,7 +122,7 @@ public class CM_MFC : IControlModule
 
         _targetSp = 0f;
         ChangeState(MfcState.Off);
-        _eventProducer.SendInfo(_cfg.Name, MfcEvents.InfoFlowStopped);
+        RaiseInfo(MfcEvents.InfoFlowStopped);
     }
     public MfcState State { get; private set; } = MfcState.Unknown;
     public MfcAlarmState AlarmState { get; } = new();
@@ -147,13 +143,8 @@ public class CM_MFC : IControlModule
     // ==========================================
     // 私有成员与状态机核心
     // ==========================================
-    private readonly ILogger<CM_MFC> _logger;
-    private readonly Dictionary<int, (Guid guid, EventBase eventBase, object[] args)> _activeAlarms = new();
     private long _currentTimestampMs;
     private readonly MfcCfg _cfg;
-    private readonly IEventProducer _eventProducer;
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private readonly LowPassFilter _filter = new();
     private float _rawPv, _filteredPv, _targetSp;
     private long? _deviationStartTimestampMs = null; // 用于流量偏差超时计时
@@ -230,25 +221,12 @@ public class CM_MFC : IControlModule
         }
     }
 
-    private void RaiseAlarm(EventBase eventbase, params object[] args)
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
     {
-        if (!_activeAlarms.ContainsKey(eventbase.EventId))
-        {
-            var guid = Guid.NewGuid();
-            _activeAlarms.Add(eventbase.EventId, (guid, eventbase, args));
-            _eventProducer.RaiseAlarm(_cfg.Name, guid, eventbase, args);
-        }
+        base.RaiseAlarm(eventbase, args);
 
         if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(MfcState.Error);
-    }
-
-    private void TryClearAlarm(EventBase eventbase)
-    {
-        if (_activeAlarms.Remove(eventbase.EventId, out var alarm))
-        {
-            _eventProducer.ClearAlarm(_cfg.Name, alarm.guid, alarm.eventBase, alarm.args);
-        }
     }
 
     private void Reset()
@@ -271,42 +249,13 @@ public class CM_MFC : IControlModule
         if (!AlarmState.HasAnyError)
         {
             ChangeState(MfcState.Unknown);
-            _eventProducer.SendInfo(_cfg.Name, MfcEvents.InfoReset);
-        }
-    }
-
-    private void ProcessCommandQueue()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            if (cmd.CancelToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 超时丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
-                continue;
-            }
-
-            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
-            {
-                handler(cmd);
-            }
-            else
-            {
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "指令未定义"));
-            }
-        }
-    }
-
-    private void PurgeCommands()
-    {
-        while (_commandQueue.TryDequeue(out var cmd))
-        {
-            cmd?.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "系统强制清理"));
+            RaiseInfo(MfcEvents.InfoReset);
         }
     }
 
     private void RegisterCommandHandlers()
     {
-        _commandHandlers[Command.SetFlow] = cmd =>
+        RegisterCommandHandler(Command.SetFlow, cmd =>
         {
             if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp))
             {
@@ -317,19 +266,19 @@ public class CM_MFC : IControlModule
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺少流量参数"));
             }
-        };
+        });
 
-        _commandHandlers[Command.Stop] = cmd =>
+        RegisterCommandHandler(Command.Stop, cmd =>
         {
             Stop();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
 
-        _commandHandlers[Command.Reset] = cmd =>
+        RegisterCommandHandler(Command.Reset, cmd =>
         {
             Reset();
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        };
+        });
     }
 }
 
