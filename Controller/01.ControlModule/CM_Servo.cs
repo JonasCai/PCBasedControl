@@ -1,7 +1,11 @@
-﻿using Controller.EventLogger;
+﻿using Controller.Common;
+using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
+using System;
 using System.Collections.Concurrent;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Controller._01.ControlModule;
 
@@ -17,35 +21,26 @@ public class CM_Servo : S88ControlModuleBase
     }
 
     // ==========================================
-    // IControlModule 接口方法
+    // S88ControlModuleBase重写接口
     // ==========================================
     public override bool HasAnyWarning => AlarmState.HasAnyWarning;
     public override bool HasAnyError => State == ServoState.Error;
+
     public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
-        // 读取硬件状态
+        // 读取硬件底层状态
         _axisStatus = _cfg.ReadAxisStatus(_cfg.AxisId);
 
-        // 处理排队的外部指令
         ProcessCommandQueue();
 
-        // 评估报警及硬/软限位联锁
-        EvaluateAlarms(_axisStatus);
+        // 报警集中评估、映射与硬件安全遮罩
+        AlarmHandler();
 
-        // 故障态立即切断运动，并跳过后续状态机
-        if (State == ServoState.Error)
-        {
-            if (!_isStopCommandSent)
-            {
-                _cfg.ActuateStop(_cfg.AxisId, true);
-                _isStopCommandSent = true;
-            }
-            return;
-        }
+        // 逻辑状态机
+        if (State == ServoState.Error) return;
 
-        // 核心状态机逻辑
         switch (State)
         {
             case ServoState.Disabled:
@@ -57,7 +52,6 @@ public class CM_Servo : S88ControlModuleBase
                 break;
 
             case ServoState.Homing:
-                // 总线延迟盲区内，忽略 Moving 状态
                 if (_currentTimestampMs - _commandIssueTimestampMs < _cfg.BusLatencyBlindTimeMs)
                     break;
 
@@ -92,6 +86,7 @@ public class CM_Servo : S88ControlModuleBase
                 break;
         }
     }
+
     public override void ToSafe()
     {
         PurgeCommands();
@@ -123,12 +118,17 @@ public class CM_Servo : S88ControlModuleBase
     public void Home()
     {
         if (!CheckBeforeMove()) return;
-        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
+
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode)
+        {
+            AlarmState.InvalidModeError = true;
+            return;
+        }
 
         _isStopCommandSent = false;
         _cfg.ActuateHome(_cfg.AxisId, _cfg.HomeMode);
 
-        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+        _commandIssueTimestampMs = _currentTimestampMs;
         ChangeState(ServoState.Homing);
         RaiseInfo(ServoEvents.InfoHomingStarted);
     }
@@ -136,12 +136,17 @@ public class CM_Servo : S88ControlModuleBase
     public void MoveAbs(double targetPos, double speed, double taccdec)
     {
         if (!CheckBeforeMove(targetPos)) return;
-        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
+
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode)
+        {
+            AlarmState.InvalidModeError = true;
+            return;
+        }
 
         _isStopCommandSent = false;
         _cfg.ActuateMoveAbs(_cfg.AxisId, targetPos, speed, taccdec);
 
-        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+        _commandIssueTimestampMs = _currentTimestampMs;
         ChangeState(ServoState.MovingAbs);
         RaiseInfo(ServoEvents.InfoMoveAbsStarted, targetPos, speed);
     }
@@ -150,30 +155,40 @@ public class CM_Servo : S88ControlModuleBase
     {
         double expectedTarget = _axisStatus.ActPos + distance;
         if (!CheckBeforeMove(expectedTarget)) return;
-        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode) return;
+
+        if (State == ServoState.TorqueMode || State == ServoState.VelocityMode)
+        {
+            AlarmState.InvalidModeError = true;
+            return;
+        }
 
         _isStopCommandSent = false;
         _cfg.ActuateMoveRel(_cfg.AxisId, distance, speed, taccdec);
 
-        _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+        _commandIssueTimestampMs = _currentTimestampMs;
         ChangeState(ServoState.MovingRel);
         RaiseInfo(ServoEvents.InfoMoveRelStarted, distance, speed);
     }
 
-    public void MoveVelocity(double speed,double taccdec)
+    public void MoveVelocity(double speed, double taccdec)
     {
         if (!CheckBeforeMove()) return;
-        if (State == ServoState.TorqueMode) return;
+
+        if (State == ServoState.TorqueMode)
+        {
+            AlarmState.InvalidModeError = true;
+            return;
+        }
 
         _isStopCommandSent = false;
         if (State == ServoState.VelocityMode)
         {
-            _cfg.ChangeVelocity(_cfg.AxisId, speed, taccdec); // 在线变速
+            _cfg.ChangeVelocity(_cfg.AxisId, speed, taccdec);
         }
         else
         {
             _cfg.ActuateVelocity(_cfg.AxisId, speed, taccdec);
-            _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+            _commandIssueTimestampMs = _currentTimestampMs;
             ChangeState(ServoState.VelocityMode);
         }
         RaiseInfo(ServoEvents.InfoMoveVelStarted, speed);
@@ -182,17 +197,22 @@ public class CM_Servo : S88ControlModuleBase
     public void SetTorque(double torquePercent)
     {
         if (!CheckBeforeMove()) return;
-        if (State == ServoState.VelocityMode) return;
+
+        if (State == ServoState.VelocityMode)
+        {
+            AlarmState.InvalidModeError = true;
+            return;
+        }
 
         _isStopCommandSent = false;
         if (State == ServoState.TorqueMode)
         {
-            _cfg.ChangeTorque(_cfg.AxisId, torquePercent); // 在线变力
+            _cfg.ChangeTorque(_cfg.AxisId, torquePercent);
         }
         else
         {
             _cfg.ActuateTorque(_cfg.AxisId, torquePercent);
-            _commandIssueTimestampMs = _currentTimestampMs; // 记录指令下发时间戳
+            _commandIssueTimestampMs = _currentTimestampMs;
             ChangeState(ServoState.TorqueMode);
         }
         RaiseInfo(ServoEvents.InfoTorqueStarted, torquePercent);
@@ -206,7 +226,6 @@ public class CM_Servo : S88ControlModuleBase
     public double ActualPosition => _axisStatus.ActPos;
     public double ActualVelocity => _axisStatus.ActVel;
     public double ActualTorque => _axisStatus.ActTrq;
-
     public ServoSnapshot GetSnapshot() => new()
     {
         Name = _cfg.Name,
@@ -219,15 +238,13 @@ public class CM_Servo : S88ControlModuleBase
     };
 
     // ==========================================
-    // 私有成员与报警逻辑
+    // 私有成员与核心逻辑
     // ==========================================
     private readonly ServoCfg _cfg;
-    private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
-
     private long _currentTimestampMs;
     private AxisStatus _axisStatus;
     private bool _isStopCommandSent = false;
-    private long _commandIssueTimestampMs = 0; // 解决总线延迟的幽灵停止问题
+    private long _commandIssueTimestampMs = 0;
 
     private void ChangeState(ServoState newState)
     {
@@ -238,120 +255,108 @@ public class CM_Servo : S88ControlModuleBase
     private bool CheckBeforeMove(double? targetPos = null)
     {
         if (State == ServoState.Error) return false;
+        bool ok = true;
 
-        // 验证使能状态
         if (!_axisStatus.ServoOn)
         {
             AlarmState.MoveWhileDisabledError = true;
-            RaiseAlarm(ServoEvents.ErrMoveWhileDisabled);
-            return false;
+            ok = false;
         }
 
-        // 验证外部联锁
         if (!_cfg.CanMove())
         {
-            AlarmState.InterlockLost = true;
-            RaiseAlarm(ServoEvents.ErrInterlockLost);
-            return false;
+            AlarmState.InterlockLostError = true;
+            ok = false;
         }
 
-        // 指令越界保护
+        // 软件限位指令预判
         if (targetPos.HasValue)
         {
             if (targetPos.Value > _cfg.SoftLimitPositive || targetPos.Value < _cfg.SoftLimitNegative)
             {
                 AlarmState.TargetOutOfBoundsError = true;
-                RaiseAlarm(ServoEvents.ErrTargetOutOfBounds, targetPos.Value, _cfg.SoftLimitNegative, _cfg.SoftLimitPositive);
-                return false;
+                AlarmState.BadTargetPos = targetPos.Value;
+                ok = false;
             }
         }
-        return true;
+
+        return ok;
     }
 
-    private void EvaluateAlarms(AxisStatus status)
+    private void AlarmHandler()
     {
-        // 伺服报警
-        if (status.Alarm)
+        // 驱动器报警
+        if (_axisStatus.Alarm)
         {
             AlarmState.DriveAlarm = true;
-            RaiseAlarm(ServoEvents.ErrDriveAlarm, AlarmState.DriveAlarmId);
+            AlarmState.DriveAlarmId = _axisStatus.ErrorCode;
         }
-        else AlarmState.DriveAlarm = false;
 
-        // 硬件正限位 (PEL)
-        if (status.PosLimit_H)
+        // 软件限位逻辑 
+        if (_axisStatus.ActPos > _cfg.SoftLimitPositive) AlarmState.SoftLimitPositiveError = true;
+        if (_axisStatus.ActPos < _cfg.SoftLimitNegative) AlarmState.SoftLimitNegativeError = true;
+
+        if (!_cfg.CanMove() && State is not ServoState.Disabled and not ServoState.Standby and not ServoState.Error)
         {
-            AlarmState.HardwareLimitPositive = true;
-            RaiseAlarm(ServoEvents.ErrPosLimit);
+            AlarmState.InterlockLostError = true;
         }
-        else AlarmState.HardwareLimitPositive = false;
 
-        // 硬件负限位 (MEL)
-        if (status.NegLimit_H)
+        if (AlarmState.HasAnyError && !_isStopCommandSent)
         {
-            AlarmState.HardwareLimitNegative = true;
-            RaiseAlarm(ServoEvents.ErrNegLimit);
+            _cfg.ActuateStop(_cfg.AxisId, true);
+            _isStopCommandSent = true;
         }
-        else AlarmState.HardwareLimitNegative = false;
 
-        // 软件正限位保护
-        if (status.PosLimit_S || status.ActPos > _cfg.SoftLimitPositive)
+        if (AlarmState.DriveAlarm) RaiseAlarm(ServoEvents.ErrDriveAlarm, AlarmState.DriveAlarmId);
+        else TryClearAlarm(ServoEvents.ErrDriveAlarm);
+
+        if (AlarmState.SoftLimitPositiveError) RaiseAlarm(ServoEvents.ErrSoftLimitPositive, _axisStatus.ActPos, _cfg.SoftLimitPositive);
+        else TryClearAlarm(ServoEvents.ErrSoftLimitPositive);
+
+        if (AlarmState.SoftLimitNegativeError) RaiseAlarm(ServoEvents.ErrSoftLimitNegative, _axisStatus.ActPos, _cfg.SoftLimitNegative);
+        else TryClearAlarm(ServoEvents.ErrSoftLimitNegative);
+
+        if (AlarmState.InterlockLostError) RaiseAlarm(ServoEvents.ErrInterlockLost);
+        else TryClearAlarm(ServoEvents.ErrInterlockLost);
+
+        if (AlarmState.MoveWhileDisabledError) RaiseAlarm(ServoEvents.ErrMoveWhileDisabled);
+        else TryClearAlarm(ServoEvents.ErrMoveWhileDisabled);
+
+        if (AlarmState.TargetOutOfBoundsError) RaiseAlarm(ServoEvents.ErrTargetOutOfBounds, AlarmState.BadTargetPos, _cfg.SoftLimitNegative, _cfg.SoftLimitPositive);
+        else TryClearAlarm(ServoEvents.ErrTargetOutOfBounds);
+
+        if (AlarmState.InvalidModeError) RaiseAlarm(ServoEvents.ErrInvalidMode, State.ToString());
+        else TryClearAlarm(ServoEvents.ErrInvalidMode);
+
+        if (AlarmState.HasAnyError && State != ServoState.Error)
         {
-            AlarmState.SoftLimitPositiveError = true;
-            RaiseAlarm(ServoEvents.ErrSoftLimitPositive, status.ActPos, _cfg.SoftLimitPositive);
-        }
-        else AlarmState.SoftLimitPositiveError = false;
-
-        // 软件负限位保护
-        if (status.NegLimit_S || status.ActPos < _cfg.SoftLimitNegative)
-        {
-            AlarmState.SoftLimitNegativeError = true;
-            RaiseAlarm(ServoEvents.ErrSoftLimitNegative, status.ActPos, _cfg.SoftLimitNegative);
-        }
-        else AlarmState.SoftLimitNegativeError = false;
-
-        // 运行中安全联锁丢失
-        if (!_cfg.CanMove())
-        {
-            if (State != ServoState.Disabled && State != ServoState.Standby && State != ServoState.Error)
-            {
-                AlarmState.InterlockLost = true;
-                RaiseAlarm(ServoEvents.ErrInterlockLost);
-            }
-        }
-        else AlarmState.InterlockLost = false;
-    }
-
-    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
-    {
-        base.RaiseAlarm(eventbase, args);
-
-        if (eventbase.Severity == SeverityLevel.Error)
             ChangeState(ServoState.Error);
+        }
     }
 
     private void Reset()
     {
         if (State != ServoState.Error) return;
 
+        // 向驱动器下发硬件复位指令
         _cfg.ClearAxisError(_cfg.AxisId);
 
-        // 【立即清除】无需等待物理恢复的事件型报警
+        // 驱动器报警必须在底层消除后才允许软件复位
+        if (!_axisStatus.Alarm) AlarmState.DriveAlarm = false;
+
+        // 必须物理上回到了软限位以内，才允许清除
+        if (_axisStatus.ActPos <= _cfg.SoftLimitPositive)
+            AlarmState.SoftLimitPositiveError = false;
+        if (_axisStatus.ActPos >= _cfg.SoftLimitNegative)
+            AlarmState.SoftLimitNegativeError = false;
+
+        // 外部联锁恢复才允许清除
+        if (_cfg.CanMove()) AlarmState.InterlockLostError = false;
+
         AlarmState.MoveWhileDisabledError = false;
-        TryClearAlarm(ServoEvents.ErrMoveWhileDisabled);
-
         AlarmState.TargetOutOfBoundsError = false;
-        TryClearAlarm(ServoEvents.ErrTargetOutOfBounds);
+        AlarmState.InvalidModeError = false;
 
-        // 【尝试清除】如果物理标志已在上一帧恢复，则清除报警历史
-        if (!AlarmState.DriveAlarm) TryClearAlarm(ServoEvents.ErrDriveAlarm);
-        if (!AlarmState.HardwareLimitPositive) TryClearAlarm(ServoEvents.ErrPosLimit);
-        if (!AlarmState.HardwareLimitNegative) TryClearAlarm(ServoEvents.ErrNegLimit);
-        if (!AlarmState.SoftLimitPositiveError) TryClearAlarm(ServoEvents.ErrSoftLimitPositive);
-        if (!AlarmState.SoftLimitNegativeError) TryClearAlarm(ServoEvents.ErrSoftLimitNegative);
-        if (!AlarmState.InterlockLost) TryClearAlarm(ServoEvents.ErrInterlockLost);
-
-        // 如果所有错误都已解除，恢复机台正常状态
         if (!AlarmState.HasAnyError)
         {
             _isStopCommandSent = false;
@@ -360,9 +365,6 @@ public class CM_Servo : S88ControlModuleBase
         }
     }
 
-    // ==========================================
-    // 外部通信指令解析映射表
-    // ==========================================
     private void RegisterCommandHandlers()
     {
         RegisterCommandHandler(Command.Enable, cmd =>
@@ -436,6 +438,13 @@ public class CM_Servo : S88ControlModuleBase
             else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "缺失 Torque 参数"));
         });
     }
+
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
+    {
+        base.RaiseAlarm(eventbase, args);
+        if (eventbase.Severity == SeverityLevel.Error)
+            ChangeState(ServoState.Error);
+    }
 }
 
 // ==========================================
@@ -444,11 +453,8 @@ public class CM_Servo : S88ControlModuleBase
 public struct AxisStatus
 {
     public bool Alarm;
-    public bool PosLimit_H;
-    public bool NegLimit_H;
+    public ushort ErrorCode; // 驱动器原生报警码
     public bool Homed;
-    public bool PosLimit_S;
-    public bool NegLimit_S;
     public bool Moving;
     public bool ServoOn;
     public double ActVel;
@@ -456,17 +462,7 @@ public struct AxisStatus
     public double ActTrq;
 }
 
-public enum ServoState
-{
-    Disabled,
-    Standby,
-    Homing,
-    MovingAbs,
-    MovingRel,
-    VelocityMode,
-    TorqueMode,
-    Error
-}
+public enum ServoState { Disabled, Standby, Homing, MovingAbs, MovingRel, VelocityMode, TorqueMode, Error }
 
 public sealed class ServoAlarmState
 {
@@ -474,19 +470,18 @@ public sealed class ServoAlarmState
 
     public bool DriveAlarm { get; internal set; }
     public ushort DriveAlarmId { get; internal set; }
-    public bool HardwareLimitPositive { get; internal set; }
-    public bool HardwareLimitNegative { get; internal set; }
     public bool SoftLimitPositiveError { get; internal set; }
     public bool SoftLimitNegativeError { get; internal set; }
     public bool TargetOutOfBoundsError { get; internal set; }
-    public bool InterlockLost { get; internal set; }
+    public double BadTargetPos { get; internal set; }
+    public bool InterlockLostError { get; internal set; }
     public bool MoveWhileDisabledError { get; internal set; }
+    public bool InvalidModeError { get; internal set; }
 
-    public bool HasAnyError => DriveAlarm || HardwareLimitPositive || HardwareLimitNegative ||
-                               SoftLimitPositiveError || SoftLimitNegativeError || TargetOutOfBoundsError ||
-                               InterlockLost || MoveWhileDisabledError;
+    public bool HasAnyError => DriveAlarm || SoftLimitPositiveError || SoftLimitNegativeError ||
+                               TargetOutOfBoundsError || InterlockLostError || MoveWhileDisabledError || InvalidModeError;
 
-    public override string ToString() => $"ALM={DriveAlarm}, ALMId={DriveAlarmId}, PEL={HardwareLimitPositive}, MEL={HardwareLimitNegative}, SoftPos={SoftLimitPositiveError}, SoftNeg={SoftLimitNegativeError}, TargetErr={TargetOutOfBoundsError}, Interlock={InterlockLost}, MoveDisabled={MoveWhileDisabledError}";
+    public override string ToString() => $"ALM={DriveAlarm}({DriveAlarmId}), SoftPos={SoftLimitPositiveError}, SoftNeg={SoftLimitNegativeError}, TargetErr={TargetOutOfBoundsError}, Interlock={InterlockLostError}, MoveDisabled={MoveWhileDisabledError}, InvalidMode={InvalidModeError}";
 }
 
 public class ServoCfg
@@ -553,19 +548,15 @@ public static class ServoEvents
     public static readonly EventBase InfoTorqueStarted = new() { EventId = 611, Severity = SeverityLevel.Info, MessageTemplate = "力矩模式控制开始 (设定力矩: {0:F2}%)" };
 
     public static readonly EventBase ErrDriveAlarm = new() { EventId = 620, Severity = SeverityLevel.Error, MessageTemplate = "伺服驱动器发生致命报警 (AlarmId : {0})" };
-    public static readonly EventBase ErrPosLimit = new() { EventId = 621, Severity = SeverityLevel.Error, MessageTemplate = "触发正向硬限位 (PEL)" };
-    public static readonly EventBase ErrNegLimit = new() { EventId = 622, Severity = SeverityLevel.Error, MessageTemplate = "触发负向硬限位 (MEL)" };
-    public static readonly EventBase ErrSoftLimitPositive = new() { EventId = 623, Severity = SeverityLevel.Error, MessageTemplate = "物理运行越过正向软件限位 (当前位置: {0:F3} > 限制: {1:F3})" };
-    public static readonly EventBase ErrSoftLimitNegative = new() { EventId = 624, Severity = SeverityLevel.Error, MessageTemplate = "物理运行越过负向软件限位 (当前位置: {0:F3} < 限制: {1:F3})" };
-    public static readonly EventBase ErrInterlockLost = new() { EventId = 625, Severity = SeverityLevel.Error, MessageTemplate = "轴运动联锁丢失" };
-    public static readonly EventBase ErrMoveWhileDisabled = new() { EventId = 626, Severity = SeverityLevel.Error, MessageTemplate = "伺服未使能时收到运动指令，拒绝执行" };
-    public static readonly EventBase ErrTargetOutOfBounds = new() { EventId = 627, Severity = SeverityLevel.Error, MessageTemplate = "目标位置越过软件极限，拒绝执行 (目标: {0:F3}, 限制: [{1:F3}, {2:F3}])" };
+    public static readonly EventBase ErrSoftLimitPositive = new() { EventId = 621, Severity = SeverityLevel.Error, MessageTemplate = "物理运行越过正向软件限位 (当前位置: {0:F3} > 限制: {1:F3})" };
+    public static readonly EventBase ErrSoftLimitNegative = new() { EventId = 622, Severity = SeverityLevel.Error, MessageTemplate = "物理运行越过负向软件限位 (当前位置: {0:F3} < 限制: {1:F3})" };
+    public static readonly EventBase ErrInterlockLost = new() { EventId = 623, Severity = SeverityLevel.Error, MessageTemplate = "轴运动联锁丢失" };
+    public static readonly EventBase ErrMoveWhileDisabled = new() { EventId = 624, Severity = SeverityLevel.Error, MessageTemplate = "伺服未使能时收到运动指令，拒绝执行" };
+    public static readonly EventBase ErrTargetOutOfBounds = new() { EventId = 625, Severity = SeverityLevel.Error, MessageTemplate = "目标位置越过软件极限，拒绝执行 (目标: {0:F3}, 限制: [{1:F3}, {2:F3}])" };
+    public static readonly EventBase ErrInvalidMode = new() { EventId = 626, Severity = SeverityLevel.Error, MessageTemplate = "模式冲突：当前处于 {0} ，拒绝执行该运动指令" };
 }
 
-public interface IServoFactory
-{
-    CM_Servo Create(ServoCfg cfg);
-}
+public interface IServoFactory { CM_Servo Create(ServoCfg cfg); }
 
 public class ServoFactory : IServoFactory
 {

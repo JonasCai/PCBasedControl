@@ -1,8 +1,11 @@
-using Controller.Common;
+ï»¿using Controller.Common;
 using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
-using System.Collections.Concurrent;
+using System;
+using System.Linq;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Controller._01.ControlModule;
 
@@ -15,83 +18,93 @@ public class CM_TempController : S88ControlModuleBase
 
         _pid.DeadBand = _cfg.PidDeadBand;
         _pid.IntegralSeparationBand = _cfg.PidIntegralSeparationBand;
-        _pid.OutputRampRatePerSecond = _cfg.PidIntegralSeparationBand;
+        _pid.OutputRampRatePerSecond = _cfg.PidOutputRampRatePerSecond;
         _autoTuner.MaxSafeTemperature = _cfg.AbsoluteMaxTempLimit;
 
         if (!_cfg.Validate())
-            throw new ArgumentException($"ÎÂ¿ØÄ£¿é [{_cfg.Name}] ÅäÖÃ²»ÍêÕû", nameof(_cfg));
+            throw new ArgumentException($"æ¸©æ§æ¨¡å— [{_cfg.Name}] é…ç½®ä¸å®Œæ•´", nameof(_cfg));
 
         RegisterCommandHandlers();
     }
 
     // ==========================================
-    // IControlModule ½Ó¿Ú·½·¨
+    // IControlModule æ¥å£æ–¹æ³•
     // ==========================================
     public override bool HasAnyError => State == TempControllerState.Error;
     public override bool HasAnyWarning => AlarmState.HasAnyWarning;
+
     public override void Refresh(long currentTimestampMs)
     {
         _currentTimestampMs = currentTimestampMs;
 
-        // ¶ÁÈ¡´«¸ĞÆ÷×´Ì¬
+        // è¯»å–å¹¶è¿‡æ»¤ä¼ æ„Ÿå™¨çŠ¶æ€
         _monitorTemperature = _cfg.ReadMonitorTemp != null ? _cfg.ReadMonitorTemp() : null;
         _thisRawTemperature = _cfg.ReadControlTemp();
         _thisFilteredTemperature = _filter.Filter(_thisRawTemperature, _cfg.FilterAlpha);
 
-        // ´¦ÀíÖ¸Áî¶ÓÁĞ
         ProcessCommandQueue();
 
-        // °²È«¼°±¨¾¯¼ì²é
-        EvaluateAlarms();
-
-        // ×´Ì¬»úÂß¼­
-        switch (State)
+        if (State == TempControllerState.Error && _targetMode != TempControllerState.Disabled)
         {
-            case TempControllerState.Error:
-            case TempControllerState.Disabled:
-                _thisPidOutputPercent = 0f;
-                _pid.Reset(_currentTimestampMs, _thisFilteredTemperature, 0);
-                _timeProportioning.Reset(_currentTimestampMs);
-                break;
-
-            case TempControllerState.Manual:
-                _thisPidOutputPercent = _pid.Compute(_thisFilteredTemperature, _currentTimestampMs);
-                break;
-
-            case TempControllerState.NormalPid:
-                // µÚÒ»´Î½øÈë£¬»òÕß´ïµ½ÁËÉè¶¨µÄ¼ä¸ô
-                if (!_lastPidComputeTimestamMs.HasValue || (_currentTimestampMs - _lastPidComputeTimestamMs.Value) >= _cfg.PidComputeIntervalMs)
-                {
-                    _thisPidOutputPercent = _pid.Compute(_thisFilteredTemperature, _currentTimestampMs);
-                    _lastPidComputeTimestamMs = _currentTimestampMs;
-                }
-                else
-                {
-                    _thisPidOutputPercent = _lastPidOutputPercent;// ÑØÓÃÉÏÒ»¸öÖÜÆÚµÄÊä³öÖµ
-                }
-                break;
-
-            case TempControllerState.AutoTune:
-                // µÚÒ»´Î½øÈë£¬»òÕß´ïµ½ÁËÉè¶¨µÄ¼ä¸ô
-                if (!_lastPidComputeTimestamMs.HasValue || (_currentTimestampMs - _lastPidComputeTimestamMs.Value) >= _cfg.PidComputeIntervalMs)
-                {
-                    _autoTuner.Update(_thisFilteredTemperature, _currentTimestampMs);
-                    HandleAutoTuneStateAfterUpdate();
-
-                    if (State != TempControllerState.AutoTune)// ×ÔÕû¶¨½áÊø£¬Ö±½Ó´ò¶Ïµ±Ç°Ö¡µÄÊä³ö¸²¸Ç
-                        break;
-
-                    _thisPidOutputPercent = (float)_autoTuner.CurrentOutputPercent;
-                    _lastPidComputeTimestamMs = _currentTimestampMs;
-                }
-                else
-                {
-                    _thisPidOutputPercent = _lastPidOutputPercent;// ÑØÓÃÉÏÒ»¸öÖÜÆÚµÄÊä³öÖµ
-                }
-                break;
+            // å¤„äºæ•…éšœæ€æ—¶ï¼Œæ‹’ç»æ–°çš„è¿è¡Œæ„å›¾ï¼Œå¿…é¡»å…ˆ Reset
+        }
+        else if (State != TempControllerState.Error)
+        {
+            if (State != _targetMode)
+            {
+                ChangeState(_targetMode);
+            }
         }
 
-        // ÖÜÆÚ¸üĞÂÎÂ¿ØÂß¼­
+        // çŠ¶æ€æœºé€»è¾‘
+        if (State != TempControllerState.Error)
+        {
+            switch (State)
+            {
+                case TempControllerState.Disabled:
+                    _thisPidOutputPercent = 0f;
+                    break;
+
+                case TempControllerState.Manual:
+                    _thisPidOutputPercent = _pid.Compute(_thisFilteredTemperature, _currentTimestampMs);
+                    break;
+
+                case TempControllerState.NormalPid:
+                    if (!_lastPidComputeTimestamMs.HasValue || (_currentTimestampMs - _lastPidComputeTimestamMs.Value) >= _cfg.PidComputeIntervalMs)
+                    {
+                        _thisPidOutputPercent = _pid.Compute(_thisFilteredTemperature, _currentTimestampMs);
+                        _lastPidComputeTimestamMs = _currentTimestampMs;
+                    }
+                    else
+                    {
+                        _thisPidOutputPercent = _lastPidOutputPercent;
+                    }
+                    break;
+
+                case TempControllerState.AutoTune:
+                    if (!_lastPidComputeTimestamMs.HasValue || (_currentTimestampMs - _lastPidComputeTimestamMs.Value) >= _cfg.PidComputeIntervalMs)
+                    {
+                        _autoTuner.Update(_thisFilteredTemperature, _currentTimestampMs);
+                        HandleAutoTuneStateAfterUpdate();
+
+                        if (State == TempControllerState.AutoTune)
+                        {
+                            _thisPidOutputPercent = (float)_autoTuner.CurrentOutputPercent;
+                            _lastPidComputeTimestamMs = _currentTimestampMs;
+                        }
+                    }
+                    else
+                    {
+                        _thisPidOutputPercent = _lastPidOutputPercent;
+                    }
+                    break;
+            }
+        }
+
+        // æŠ¥è­¦é›†ä¸­è¯„ä¼°ä¸æ˜ å°„
+        AlarmHandler();
+
+        // ç‰©ç†è¾“å‡ºå†™å…¥
         _cfg.SetDutyRatio?.Invoke(_thisPidOutputPercent);
         if (_cfg.SetHeaterOn != null)
         {
@@ -101,23 +114,25 @@ public class CM_TempController : S88ControlModuleBase
         }
 
         _lastPidOutputPercent = _thisPidOutputPercent;
-
     }
+
     public override void ToSafe()
     {
         Stop();
         PurgeCommands();
+        _thisPidOutputPercent = 0f;
         _cfg.SetHeaterOn?.Invoke(false);
         _cfg.SetDutyRatio?.Invoke(0f);
     }
 
     // ==========================================
-    // Íâ²¿½Ó¿Ú / ×´Ì¬²éÑ¯
+    // å¤–éƒ¨æ¥å£ / æ„å›¾æ¥æ”¶å™¨
     // ==========================================
     public TempControllerState State { get; private set; } = TempControllerState.Disabled;
     public TempControllerAlarmState AlarmState { get; } = new();
     public bool PidTargetReached { get; private set; }
     public bool PidDevCheck { get; set; }
+
     public float PidSetpoint
     {
         get => _pid.Setpoint;
@@ -131,6 +146,7 @@ public class CM_TempController : S88ControlModuleBase
             }
         }
     }
+
     public float ManualOutputPercent
     {
         get => _manualOutputPercent;
@@ -140,49 +156,55 @@ public class CM_TempController : S88ControlModuleBase
             if (_manualOutputPercent != newValue)
             {
                 var oldValue = _manualOutputPercent;
-                _manualOutputPercent = value;
+                _manualOutputPercent = newValue;
                 RaiseInfo(TempControllerEvents.InfoPidManualOutputChanged, oldValue, newValue);
+                if (State == TempControllerState.Manual)
+                    _pid.SwitchToManual(_manualOutputPercent);
             }
         }
     }
+
     public void Start(float? sp = null)
     {
-        if (State != TempControllerState.Disabled)
-            return;
+        if (State == TempControllerState.Error) return;
+        if (sp.HasValue) PidSetpoint = sp.Value;
 
-        if (sp.HasValue)
-            PidSetpoint = sp.Value;
-
+        _targetMode = TempControllerState.NormalPid;
         RaiseInfo(TempControllerEvents.InfoPidStart, PidSetpoint);
-        ChangeState(TempControllerState.NormalPid);
     }
+
     public void Stop()
     {
-        if (State == TempControllerState.Disabled || State == TempControllerState.Error)
-            return;
+        _targetMode = TempControllerState.Disabled; // ä»»ä½•æ—¶å€™éƒ½å…è®¸åœæ­¢
         RaiseInfo(TempControllerEvents.InfoPidStop);
-        ChangeState(TempControllerState.Disabled);
     }
+
     public void SwitchToNormalPid(float? sp = null)
     {
-        if (State == TempControllerState.Disabled || State == TempControllerState.NormalPid || State == TempControllerState.Error)
-            return;
-        if (sp.HasValue)
-            PidSetpoint = sp.Value;
-        ChangeState(TempControllerState.NormalPid);
+        if (State == TempControllerState.Error) return;
+        if (sp.HasValue) PidSetpoint = sp.Value;
+        _targetMode = TempControllerState.NormalPid;
     }
+
     public void SwitchToManual(float? output = null)
     {
-        if (State == TempControllerState.Disabled || State == TempControllerState.Manual || State == TempControllerState.Error)
-            return;
-        if (output.HasValue)
-            ManualOutputPercent = output.Value;
-        ChangeState(TempControllerState.Manual);
+        if (State == TempControllerState.Error) return;
+        if (output.HasValue) ManualOutputPercent = output.Value;
+        _targetMode = TempControllerState.Manual;
     }
+
+    private void SwitchToAutoTune(float? sp = null)
+    {
+        if (State == TempControllerState.Error) return;
+        if (sp.HasValue) PidSetpoint = sp.Value;
+        _targetMode = TempControllerState.AutoTune;
+    }
+
     public TempControllerSnapshot GetSnapshot() => new()
     {
         Name = _cfg.Name,
         State = State,
+        TargetMode = _targetMode,
         AlarmState = AlarmState,
         DutyRatio = _thisPidOutputPercent,
         RawTemperature = _thisRawTemperature,
@@ -195,7 +217,7 @@ public class CM_TempController : S88ControlModuleBase
     };
 
     // ==========================================
-    // Ë½ÓĞ³ÉÔ±ÓëÄÚ²¿Àà
+    // ç§æœ‰æˆå‘˜ä¸å†…éƒ¨é€»è¾‘
     // ==========================================
     private readonly TempControllerCfg _cfg;
     private readonly TemperaturePidController _pid = new();
@@ -207,151 +229,34 @@ public class CM_TempController : S88ControlModuleBase
     private long _currentTimestampMs;
     private bool _thisHeaterOn = false;
     private long? _lastPidComputeTimestamMs = null;
-    private void RegisterCommandHandlers()
-    {
-        RegisterCommandHandler(Command.Start, cmd =>
-        {
-            if (cmd.Params.Count > 0)
-            {
-                if (float.TryParse(cmd.Params.Values.First(), out var sp))
-                    Start(sp);
-                else
-                    Start();
-            }
-            else
-            {
-                Start();
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-        RegisterCommandHandler(Command.ChangeSP, cmd =>
-        {
-            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp))
-            {
-                PidSetpoint = sp;
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                return;
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "È±ÉÙÉè¶¨Öµ²ÎÊı"));
-        });
-
-        RegisterCommandHandler(Command.ChangeManualOutput, cmd =>
-        {
-            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var output))
-            {
-                ManualOutputPercent = output;
-                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                return;
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "È±ÉÙÊÖ¶¯Êä³ö²ÎÊı"));
-        });
-
-        RegisterCommandHandler(Command.SetPID, cmd =>
-        {
-            if (cmd.Params.TryGetValue("P", out var p) && cmd.Params.TryGetValue("I", out var i) && cmd.Params.TryGetValue("D", out var d))
-            {
-                if (float.TryParse(p, out var kp) && float.TryParse(i, out var ki) && float.TryParse(d, out var kd))
-                {
-                    SetPid(kp, ki, kd);
-                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                    return;
-                }
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "P/I/D²ÎÊı²»ÍêÕû»òÕß¸ñÊ½´íÎó"));
-        });
-
-        RegisterCommandHandler(Command.Stop, cmd =>
-        {
-            Stop();
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-
-        RegisterCommandHandler(Command.Reset, cmd =>
-        {
-            Reset();
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-
-        RegisterCommandHandler(Command.SwitchToManual, cmd =>
-        {
-            if (cmd.Params.Count > 0)
-            {
-                if (float.TryParse(cmd.Params.Values.First(), out var output))
-                    SwitchToManual(output);
-                else
-                    SwitchToManual();
-            }
-            else
-            {
-                SwitchToManual();
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-
-        RegisterCommandHandler(Command.SwitchToNormalPid, cmd =>
-        {
-            if (cmd.Params.Count > 0)
-            {
-                if (float.TryParse(cmd.Params.Values.First(), out var sp))
-                    SwitchToNormalPid(sp);
-                else
-                    SwitchToNormalPid();
-            }
-            else
-            {
-                SwitchToNormalPid();
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-
-        RegisterCommandHandler(Command.SwitchToAutoTune, cmd =>
-        {
-            if (cmd.Params.Count > 0)
-            {
-                if (float.TryParse(cmd.Params.Values.First(), out var sp))
-                    SwitchToAutoTune(sp);
-                else
-                    SwitchToAutoTune();
-            }
-            else
-            {
-                SwitchToAutoTune();
-            }
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-
-        RegisterCommandHandler(Command.StopAutoTune, cmd =>
-        {
-            if (State == TempControllerState.AutoTune && _autoTuner.Status == AutoTuneStatus.Running)
-                _autoTuner.Cancel();
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-        });
-    }
+    private TempControllerState _targetMode = TempControllerState.Disabled;
     private void ChangeState(TempControllerState newState)
     {
         if (State == newState) return;
+
+        // å¤„ç†åº•å±‚ PID/TimeProportioning å¼•æ“çš„æ— æ‰°åˆ‡æ¢ä¸é‡ç½®
         switch (newState)
         {
             case TempControllerState.Disabled:
+            case TempControllerState.Error:
                 _timeProportioning.OutputPercent = 0f;
                 _pid.SwitchToManual(0f);
-                if (State == TempControllerState.AutoTune)
-                    _autoTuner.Reset();
+                _pid.Reset(_currentTimestampMs, _thisFilteredTemperature, 0);
+                _timeProportioning.Reset(_currentTimestampMs);
+                if (State == TempControllerState.AutoTune) _autoTuner.Reset();
                 break;
 
             case TempControllerState.Manual:
                 _pid.SwitchToManual(ManualOutputPercent);
                 _timeProportioning.Reset(_currentTimestampMs);
-                if (State == TempControllerState.AutoTune)
-                    _autoTuner.Reset();
+                if (State == TempControllerState.AutoTune) _autoTuner.Reset();
                 break;
 
             case TempControllerState.NormalPid:
                 _pid.SwitchToAuto(_currentTimestampMs, _lastPidOutputPercent, _thisFilteredTemperature);
                 _timeProportioning.Reset(_currentTimestampMs);
-                _lastPidComputeTimestamMs = null; // È·±£Á¢¼´Ö´ĞĞÒ»´Î PID ¼ÆËã
-                if (State == TempControllerState.AutoTune)
-                    _autoTuner.Reset();
+                _lastPidComputeTimestamMs = null;
+                if (State == TempControllerState.AutoTune) _autoTuner.Reset();
                 break;
 
             case TempControllerState.AutoTune:
@@ -359,13 +264,15 @@ public class CM_TempController : S88ControlModuleBase
                 _autoTuner.Setpoint = _pid.Setpoint;
                 _autoTuner.Start(_cfg.RelayAutoTuneOptions, _currentTimestampMs);
                 _timeProportioning.Reset(_currentTimestampMs);
-                _lastPidComputeTimestamMs = null;// È·±£Á¢¼´Ö´ĞĞÒ»´Î Update ¼ÆËã
+                _lastPidComputeTimestamMs = null;
                 break;
         }
+
         TempControllerState oldState = State;
         State = newState;
         RaiseInfo(TempControllerEvents.InfoStateChanged, oldState, newState);
     }
+
     private void HandleAutoTuneStateAfterUpdate()
     {
         switch (_autoTuner.Status)
@@ -379,7 +286,7 @@ public class CM_TempController : S88ControlModuleBase
                     RaiseInfo(TempControllerEvents.InfoAutoTuneSucceed);
                     SetPid((float)_autoTuner.Result.Kp, (float)_autoTuner.Result.Ki, (float)_autoTuner.Result.Kd);
                 }
-                SwitchToNormalPid();
+                SwitchToNormalPid(); // æ”¹å›æ­£å¸¸æ¨¡å¼
                 break;
 
             case AutoTuneStatus.Failed:
@@ -392,103 +299,196 @@ public class CM_TempController : S88ControlModuleBase
                 break;
         }
     }
-    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
-    {
-        base.RaiseAlarm(eventbase, args);
 
-        ChangeState(TempControllerState.Error);
+    private void AlarmHandler()
+    {
+        // æé™è¶…æ¸©æŠ¥è­¦ (PV Over Limit)
+        if (_thisRawTemperature > _cfg.AbsoluteMaxTempLimit || _thisRawTemperature < _cfg.AbsoluteMinTempLimit ||
+           (_monitorTemperature.HasValue && (_monitorTemperature > _cfg.AbsoluteMaxTempLimit || _monitorTemperature < _cfg.AbsoluteMinTempLimit)))
+        {
+            AlarmState.PVOverLimitError = true;
+        }
+
+        // PID åå·®æŠ¥è­¦
+        if (State == TempControllerState.NormalPid)
+        {
+            _thisError = Math.Abs(PidSetpoint - _thisRawTemperature);
+            PidTargetReached = _thisError <= _cfg.PidTolerance;
+
+            if (_thisError > _cfg.PidErrorDev && PidDevCheck)
+            {
+                AlarmState.HighHighDevError = true; 
+            }
+
+            float deadband = _cfg.PidDeadBand > 0 ? _cfg.PidDeadBand : 1.0f;
+            if (_thisError > _cfg.PidWarningDev && _thisError <= _cfg.PidErrorDev && PidDevCheck)
+            {
+                AlarmState.HighDevWarning = true;
+            }
+            else if (_thisError <= _cfg.PidWarningDev - deadband)
+            {
+                AlarmState.HighDevWarning = false;
+            }
+        }
+        else
+        {
+            PidTargetReached = false;
+            AlarmState.HighDevWarning = false;
+        }
+
+        // è”é”ä¸¢å¤±æŠ¥è­¦
+        if (!_cfg.CanExecute() && State != TempControllerState.Disabled && State != TempControllerState.Error)
+        {
+            AlarmState.ExecuteConditionsNotMetError = true;
+        }
+
+        if (AlarmState.HasAnyError)
+        {
+            _targetMode = TempControllerState.Disabled;
+            _thisPidOutputPercent = 0f; // ç¬é—´æ¸…é›¶ï¼Œåˆ‡æ–­è¾“å‡º
+        }
+
+        if (AlarmState.PVOverLimitError) RaiseAlarm(TempControllerEvents.ErrPVOverLimit, _thisRawTemperature, _monitorTemperature ?? float.NaN, _cfg.AbsoluteMinTempLimit, _cfg.AbsoluteMaxTempLimit);
+        else TryClearAlarm(TempControllerEvents.ErrPVOverLimit);
+
+        if (AlarmState.HighHighDevError) RaiseAlarm(TempControllerEvents.ErrHighHighDev, _thisRawTemperature, PidSetpoint);
+        else TryClearAlarm(TempControllerEvents.ErrHighHighDev);
+
+        if (AlarmState.ExecuteConditionsNotMetError) RaiseAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
+        else TryClearAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
+
+        if (AlarmState.HighDevWarning) RaiseAlarm(TempControllerEvents.WarningHighDev, _thisRawTemperature, PidSetpoint);
+        else TryClearAlarm(TempControllerEvents.WarningHighDev);
+
+        if (AlarmState.HasAnyError && State != TempControllerState.Error)
+        {
+            ChangeState(TempControllerState.Error);
+        }
     }
+
     private void Reset()
     {
         if (State != TempControllerState.Error) return;
 
-        if (!AlarmState.PVOverLimitError)
+        float deadband = _cfg.PidDeadBand > 0 ? _cfg.PidDeadBand : 1.0f;
+
+        // ç‰©ç†è”é”ï¼šå¿…é¡»å›è½åˆ°æ­»åŒºä»¥å†…æ‰å…è®¸æ¶ˆé™¤è¶…æ¸©ï¼
+        bool pvOk = _thisRawTemperature <= _cfg.AbsoluteMaxTempLimit - deadband &&
+                    _thisRawTemperature >= _cfg.AbsoluteMinTempLimit + deadband;
+        bool monitorOk = !_monitorTemperature.HasValue ||
+                         (_monitorTemperature.Value <= _cfg.AbsoluteMaxTempLimit - deadband &&
+                          _monitorTemperature.Value >= _cfg.AbsoluteMinTempLimit + deadband);
+
+        if (pvOk && monitorOk)
         {
-            TryClearAlarm(TempControllerEvents.ErrPVOverLimit);
+            AlarmState.PVOverLimitError = false;
         }
 
-        if (!AlarmState.HighHighDevError)
+        // åå·®é”™è¯¯ï¼šç›®æ ‡æ„å›¾å·²ä¸å†æ˜¯ NormalPidï¼ˆæ”¾å¼ƒæ¸©æ§ï¼‰ï¼Œæˆ–åå·®è·Œå‡ºæ­»åŒºï¼Œæ‰å…è®¸æ¶ˆé™¤
+        if (_targetMode != TempControllerState.NormalPid || _thisError <= _cfg.PidErrorDev - deadband)
         {
-            TryClearAlarm(TempControllerEvents.ErrHighHighDev);
+            AlarmState.HighHighDevError = false;
         }
 
-        if (!AlarmState.HighDevWarning)
+        // è”é”é”™è¯¯ï¼šå¤–éƒ¨è”é”æ¢å¤ï¼Œæˆ–æ„å›¾æ”¹ä¸ºåœæ­¢ï¼Œå…è®¸æ¶ˆé™¤
+        if (_cfg.CanExecute() || _targetMode == TempControllerState.Disabled)
         {
-            TryClearAlarm(TempControllerEvents.WarningHighDev);
-        }
-
-        if (!AlarmState.ExecuteConditionsNotMetError)
-        {
-            TryClearAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
+            AlarmState.ExecuteConditionsNotMetError = false;
         }
 
         if (!AlarmState.HasAnyError)
         {
             ChangeState(TempControllerState.Disabled);
+            RaiseInfo(TempControllerEvents.InfoPidReset);
         }
+    }
 
-        RaiseInfo(TempControllerEvents.InfoPidReset);
-    }
-    private void SwitchToAutoTune(float? sp = null)
-    {
-        if (State == TempControllerState.Disabled || State == TempControllerState.AutoTune || State == TempControllerState.Error)
-            return;
-        if (sp.HasValue)
-            PidSetpoint = sp.Value;
-        ChangeState(TempControllerState.AutoTune);
-    }
     private void SetPid(float Kp, float Ki, float Kd)
     {
-        var oldKp = _pid.Kp;
-        var oldKi = _pid.Ki;
-        var oldKd = _pid.Kd;
-        _pid.Kp = Kp;
-        _pid.Ki = Ki;
-        _pid.Kd = Kd;
+        var oldKp = _pid.Kp; var oldKi = _pid.Ki; var oldKd = _pid.Kd;
+        _pid.Kp = Kp; _pid.Ki = Ki; _pid.Kd = Kd;
         RaiseInfo(TempControllerEvents.InfoPidParaChanged, oldKp, Kp, oldKi, Ki, oldKd, Kd);
     }
-    private void EvaluateAlarms()
+
+    private void RegisterCommandHandlers()
     {
-        // ¼«Öµ±¨¾¯
-        if (_thisRawTemperature > _cfg.AbsoluteMaxTempLimit || _thisRawTemperature < _cfg.AbsoluteMinTempLimit || (_monitorTemperature.HasValue && (_monitorTemperature > _cfg.AbsoluteMaxTempLimit || _monitorTemperature < _cfg.AbsoluteMinTempLimit)))
+        RegisterCommandHandler(Command.Start, cmd =>
         {
-            AlarmState.PVOverLimitError = true;
-            RaiseAlarm(TempControllerEvents.ErrPVOverLimit, _thisRawTemperature, _monitorTemperature ?? float.NaN, _cfg.AbsoluteMinTempLimit, _cfg.AbsoluteMaxTempLimit);
-        }
-        else { AlarmState.PVOverLimitError = false; }
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp)) Start(sp);
+            else Start();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        });
 
-        // Æ«²î±¨¾¯
-        if (State == TempControllerState.NormalPid)
+        RegisterCommandHandler(Command.ChangeSP, cmd =>
         {
-            _thisError = Math.Abs(PidSetpoint - _thisRawTemperature);
-            PidTargetReached = _thisError <= _cfg.PidTolerance;
-            if (_thisError > _cfg.PidErrorDev && PidDevCheck)
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp))
             {
-                AlarmState.HighHighDevError = true;
-                RaiseAlarm(TempControllerEvents.ErrHighHighDev, _thisRawTemperature, PidSetpoint);
+                PidSetpoint = sp;
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
             }
-            else { AlarmState.HighHighDevError = false; }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå°‘è®¾å®šå€¼å‚æ•°"));
+        });
 
-            if (_thisError > _cfg.PidWarningDev && _thisError <= _cfg.PidErrorDev && PidDevCheck)
-            {
-                AlarmState.HighDevWarning = true;
-                RaiseAlarm(TempControllerEvents.WarningHighDev, _thisRawTemperature, PidSetpoint);
-            }
-            else
-            {
-                AlarmState.HighDevWarning = false;
-                TryClearAlarm(TempControllerEvents.WarningHighDev);//¾¯¸æÀàĞÍ×Ô¶¯Çå³ı
-            }
-        }
-        else { PidTargetReached = false; }
-
-        // ÁªËø±¨¾¯
-        if (!_cfg.CanExecute())
+        RegisterCommandHandler(Command.ChangeManualOutput, cmd =>
         {
-            AlarmState.ExecuteConditionsNotMetError = true;
-            RaiseAlarm(TempControllerEvents.ErrExecuteConditionsNotMet);
-        }
-        else { AlarmState.ExecuteConditionsNotMetError = false; }
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var output))
+            {
+                ManualOutputPercent = output;
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+            }
+            else cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "ç¼ºå°‘æ‰‹åŠ¨è¾“å‡ºå‚æ•°"));
+        });
+
+        RegisterCommandHandler(Command.SetPID, cmd =>
+        {
+            if (cmd.Params.TryGetValue("P", out var p) && cmd.Params.TryGetValue("I", out var i) && cmd.Params.TryGetValue("D", out var d))
+            {
+                if (float.TryParse(p, out var kp) && float.TryParse(i, out var ki) && float.TryParse(d, out var kd))
+                {
+                    SetPid(kp, ki, kd);
+                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+                    return;
+                }
+            }
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, "P/I/Då‚æ•°ä¸å®Œæ•´æˆ–è€…æ ¼å¼é”™è¯¯"));
+        });
+
+        RegisterCommandHandler(Command.Stop, cmd => { Stop(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, "")); });
+        RegisterCommandHandler(Command.Reset, cmd => { Reset(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, "")); });
+
+        RegisterCommandHandler(Command.SwitchToManual, cmd =>
+        {
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var output)) SwitchToManual(output);
+            else SwitchToManual();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        });
+
+        RegisterCommandHandler(Command.SwitchToNormalPid, cmd =>
+        {
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp)) SwitchToNormalPid(sp);
+            else SwitchToNormalPid();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        });
+
+        RegisterCommandHandler(Command.SwitchToAutoTune, cmd =>
+        {
+            if (cmd.Params.Count > 0 && float.TryParse(cmd.Params.Values.First(), out var sp)) SwitchToAutoTune(sp);
+            else SwitchToAutoTune();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        });
+
+        RegisterCommandHandler(Command.StopAutoTune, cmd =>
+        {
+            if (State == TempControllerState.AutoTune && _autoTuner.Status == AutoTuneStatus.Running) _autoTuner.Cancel();
+            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, ""));
+        });
+    }
+
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
+    {
+        base.RaiseAlarm(eventbase, args);
+        if (eventbase.Severity == SeverityLevel.Error)
+            ChangeState(TempControllerState.Error);
     }
 }
 
@@ -503,8 +503,8 @@ public class TempControllerCfg
     public float PidTolerance { get; init; } = 1.0f;
     public float PidWarningDev { get; init; } = 2.0f;
     public float PidErrorDev { get; init; } = 5.0f;
-    public float AbsoluteMaxTempLimit { get; init; } = 200.0f;  // ¾ø¶Ô×î¸ß°²È«ÎÂ¶ÈÉÏÏŞ (¡ãC)
-    public float AbsoluteMinTempLimit { get; init; } = 0.0f;  // ¾ø¶Ô×î¸ß°²È«ÎÂ¶ÈÏÂÏŞ (¡ãC)
+    public float AbsoluteMaxTempLimit { get; init; } = 200.0f;  // ç»å¯¹æœ€é«˜å®‰å…¨æ¸©åº¦ä¸Šé™ (Â°C)
+    public float AbsoluteMinTempLimit { get; init; } = 0.0f;  // ç»å¯¹æœ€é«˜å®‰å…¨æ¸©åº¦ä¸‹é™ (Â°C)
     public uint TimeProportioningCTMs { get; init; } = 2000;
     public uint PidComputeIntervalMs { get; init; } = 500;
     public float PidIntegralSeparationBand { get; set; } = 5.0f;
@@ -523,21 +523,21 @@ public class TempControllerCfg
 }
 public static class TempControllerEvents
 {
-    public static readonly EventBase InfoStateChanged = new() { EventId = 200, Severity = SeverityLevel.Info, MessageTemplate = "×´Ì¬ÇĞ»» ({0} -> {1})" };
-    public static readonly EventBase InfoPidSPChanged = new() { EventId = 201, Severity = SeverityLevel.Info, MessageTemplate = "PidÉè¶¨Öµ±ä»¯ ({0:F1} -> {1:F1})" };
-    public static readonly EventBase InfoPidManualOutputChanged = new() { EventId = 202, Severity = SeverityLevel.Info, MessageTemplate = "PidÊÖ¶¯Êä³öÖµ±ä»¯ ({0:F1} -> {1:F1})" };
-    public static readonly EventBase InfoPidStart = new() { EventId = 203, Severity = SeverityLevel.Info, MessageTemplate = "PidÆô¶¯´¥·¢ (SP: {0:F1})" };
-    public static readonly EventBase InfoPidStop = new() { EventId = 204, Severity = SeverityLevel.Info, MessageTemplate = "PidÍ£Ö¹´¥·¢" };
-    public static readonly EventBase InfoPidParaChanged = new() { EventId = 205, Severity = SeverityLevel.Info, MessageTemplate = "Pid²ÎÊı±ä»¯ (Kp: {0} -> {1}, Ki: {2} -> {3}, Kd: {4} -> {5})" };
-    public static readonly EventBase InfoPidReset = new() { EventId = 206, Severity = SeverityLevel.Info, MessageTemplate = "Pid´íÎó¸´Î»´¥·¢" };
-    public static readonly EventBase InfoAutoTuneSucceed = new() { EventId = 207, Severity = SeverityLevel.Info, MessageTemplate = "Pid²ÎÊı×ÔÕû¶¨³É¹¦" };
-    public static readonly EventBase InfoAutoTuneFailedOrCanceled = new() { EventId = 208, Severity = SeverityLevel.Info, MessageTemplate = "Pid²ÎÊı×ÔÕû¶¨Ê§°Ü»òÕß±»È¡Ïû ({0})" };
+    public static readonly EventBase InfoStateChanged = new() { EventId = 200, Severity = SeverityLevel.Info, MessageTemplate = "çŠ¶æ€åˆ‡æ¢ ({0} -> {1})" };
+    public static readonly EventBase InfoPidSPChanged = new() { EventId = 201, Severity = SeverityLevel.Info, MessageTemplate = "Pidè®¾å®šå€¼å˜åŒ– ({0:F1} -> {1:F1})" };
+    public static readonly EventBase InfoPidManualOutputChanged = new() { EventId = 202, Severity = SeverityLevel.Info, MessageTemplate = "Pidæ‰‹åŠ¨è¾“å‡ºå€¼å˜åŒ– ({0:F1} -> {1:F1})" };
+    public static readonly EventBase InfoPidStart = new() { EventId = 203, Severity = SeverityLevel.Info, MessageTemplate = "Pidå¯åŠ¨è§¦å‘ (SP: {0:F1})" };
+    public static readonly EventBase InfoPidStop = new() { EventId = 204, Severity = SeverityLevel.Info, MessageTemplate = "Pidåœæ­¢è§¦å‘" };
+    public static readonly EventBase InfoPidParaChanged = new() { EventId = 205, Severity = SeverityLevel.Info, MessageTemplate = "Pidå‚æ•°å˜åŒ– (Kp: {0} -> {1}, Ki: {2} -> {3}, Kd: {4} -> {5})" };
+    public static readonly EventBase InfoPidReset = new() { EventId = 206, Severity = SeverityLevel.Info, MessageTemplate = "Pidé”™è¯¯å¤ä½è§¦å‘" };
+    public static readonly EventBase InfoAutoTuneSucceed = new() { EventId = 207, Severity = SeverityLevel.Info, MessageTemplate = "Pidå‚æ•°è‡ªæ•´å®šæˆåŠŸ" };
+    public static readonly EventBase InfoAutoTuneFailedOrCanceled = new() { EventId = 208, Severity = SeverityLevel.Info, MessageTemplate = "Pidå‚æ•°è‡ªæ•´å®šå¤±è´¥æˆ–è€…è¢«å–æ¶ˆ ({0})" };
 
-    public static readonly EventBase ErrPVOverLimit = new() { EventId = 220, Severity = SeverityLevel.Error, MessageTemplate = "µ±Ç°ÎÂ¶È³¬³ö×î´óÏŞÖÆ (ControlPV£º{0:F1} ,MonitorlPV£º{1:F1} ,MinLimit: {2:F1}, MaxLimit: {3:F1})" };
-    public static readonly EventBase ErrHighHighDev = new() { EventId = 221, Severity = SeverityLevel.Error, MessageTemplate = "ÎÂ¶È¸ß¸ßÆ«²î´íÎó (PV: {0:F1} , SP: {1:F1})" };
-    public static readonly EventBase ErrExecuteConditionsNotMet = new() { EventId = 222, Severity = SeverityLevel.Error, MessageTemplate = "°²È«ÁªËø´¥·¢" };
+    public static readonly EventBase ErrPVOverLimit = new() { EventId = 220, Severity = SeverityLevel.Error, MessageTemplate = "å½“å‰æ¸©åº¦è¶…å‡ºæœ€å¤§é™åˆ¶ (ControlPVï¼š{0:F1} ,MonitorlPVï¼š{1:F1} ,MinLimit: {2:F1}, MaxLimit: {3:F1})" };
+    public static readonly EventBase ErrHighHighDev = new() { EventId = 221, Severity = SeverityLevel.Error, MessageTemplate = "æ¸©åº¦é«˜é«˜åå·®é”™è¯¯ (PV: {0:F1} , SP: {1:F1})" };
+    public static readonly EventBase ErrExecuteConditionsNotMet = new() { EventId = 222, Severity = SeverityLevel.Error, MessageTemplate = "å®‰å…¨è”é”è§¦å‘" };
 
-    public static readonly EventBase WarningHighDev = new() { EventId = 240, Severity = SeverityLevel.Warning, MessageTemplate = "ÎÂ¶È¸ßÆ«²î¾¯¸æ (PV: {0:F1} , SP: {1:F1})" };
+    public static readonly EventBase WarningHighDev = new() { EventId = 240, Severity = SeverityLevel.Warning, MessageTemplate = "æ¸©åº¦é«˜åå·®è­¦å‘Š (PV: {0:F1} , SP: {1:F1})" };
 }
 public sealed class TempControllerAlarmState
 {
@@ -561,39 +561,39 @@ public class TempControllerFactory : ITempControllerFactory
 }
 
 // ==========================================
-// µ×²ã PID ÓëÎÂ¿ØÂß¼­ºËĞÄ
+// åº•å±‚ PID ä¸æ¸©æ§é€»è¾‘æ ¸å¿ƒ
 // ==========================================
 #region Common Enums
 public enum TempControllerState { Disabled, Manual, NormalPid, AutoTune, Error }
 public enum AutoTuneRule
 {
     /// <summary>
-    /// ¿ØÖÆ·ç¸ñ£º¼¤½ø¡¢¿ìËÙ¡¢¿¹¸ÉÈÅÇ¿¡£
-    /// ÌØµã£ºËüµÄÊıÑ§Ä¿±êÊÇ´ïµ½¾­µäµÄ ¡°1/4 Ë¥¼õ±È¡±£¨¼´µÚÒ»¸ö³¬µ÷²¨·åÊÇµÚ¶ş¸ö²¨·åµÄ 4 ±¶£©¡£ÕâÒâÎ¶×ÅËüÒ»¶¨»á²úÉú³¬µ÷£¬¶øÇÒ³õÊ¼Õğµ´±È½ÏÃ÷ÏÔ£¬µ«ÏµÍ³»áÓÃ×î¿ìµÄËÙ¶È±Æ½üÉè¶¨Öµ¡£
-    /// ÊÊÓÃ³¡¾°£º
-    /// ¶Ô³¬µ÷²»Ãô¸ĞµÄÏµÍ³¡£
-    /// ĞèÒª¼«ËÙÏìÓ¦µÄÏµÍ³£¨ÀıÈç£ºËÅ·şµç»úÎ»ÖÃ¿ØÖÆ¡¢ÎŞÖÍºóµÄÕÅÁ¦¿ØÖÆ£©¡£
-    /// Íâ²¿¸ÉÈÅ·Ç³£´ó£¬ĞèÒª PID Ë²¼äÊä³ö¾Ş´óÁ¦Á¿À­»ØÉè¶¨µÄ³¡¾°¡£
+    /// æ§åˆ¶é£æ ¼ï¼šæ¿€è¿›ã€å¿«é€Ÿã€æŠ—å¹²æ‰°å¼ºã€‚
+    /// ç‰¹ç‚¹ï¼šå®ƒçš„æ•°å­¦ç›®æ ‡æ˜¯è¾¾åˆ°ç»å…¸çš„ â€œ1/4 è¡°å‡æ¯”â€ï¼ˆå³ç¬¬ä¸€ä¸ªè¶…è°ƒæ³¢å³°æ˜¯ç¬¬äºŒä¸ªæ³¢å³°çš„ 4 å€ï¼‰ã€‚è¿™æ„å‘³ç€å®ƒä¸€å®šä¼šäº§ç”Ÿè¶…è°ƒï¼Œè€Œä¸”åˆå§‹éœ‡è¡æ¯”è¾ƒæ˜æ˜¾ï¼Œä½†ç³»ç»Ÿä¼šç”¨æœ€å¿«çš„é€Ÿåº¦é€¼è¿‘è®¾å®šå€¼ã€‚
+    /// é€‚ç”¨åœºæ™¯ï¼š
+    /// å¯¹è¶…è°ƒä¸æ•æ„Ÿçš„ç³»ç»Ÿã€‚
+    /// éœ€è¦æé€Ÿå“åº”çš„ç³»ç»Ÿï¼ˆä¾‹å¦‚ï¼šä¼ºæœç”µæœºä½ç½®æ§åˆ¶ã€æ— æ»åçš„å¼ åŠ›æ§åˆ¶ï¼‰ã€‚
+    /// å¤–éƒ¨å¹²æ‰°éå¸¸å¤§ï¼Œéœ€è¦ PID ç¬é—´è¾“å‡ºå·¨å¤§åŠ›é‡æ‹‰å›è®¾å®šçš„åœºæ™¯ã€‚
     /// </summary>
     ZieglerNicholsPid,
 
     /// <summary>
-    /// ¿ØÖÆ·ç¸ñ£º±£ÊØ¡¢Æ½ÎÈ¡¢¸ßÂ³°ôĞÔ¡£
-    /// ÌØµã£º¼ÆËã³öµÄ±ÈÀıÏµÊı (K_p) ½ÏĞ¡£¬»ı·ÖÊ±¼ä¸ü³¤¡£ËüµÄÄ¿±êÊÇ¾¡Á¿²»²úÉú³¬µ÷£¬»òÕß²úÉú¼«Ğ¡µÄ³¬µ÷£¬ÈÃÏµÍ³Æ½»¬µØµ½´ïÄ¿±êÖµ¡£
-    /// ÊÊÓÃ³¡¾°£º
-    /// ÎÂ¶È¿ØÖÆ£¨Ç¿ÁÒÍÆ¼ö£©£ºÒòÎª´ó¶àÊı¼ÓÈÈÏµÍ³¡°ÉıÎÂÈİÒ×½µÎÂÄÑ¡±£¬Ò»µ©³¬µ÷£¬Ö»ÄÜ¿¿×ÔÈ»É¢ÈÈ£¬»Ö¸´¼«Âı¡£T-L ·¨ÄÜÍêÃÀ±ÜÃâÕâÖÖÂé·³¡£
-    /// ´ó´¿ÖÍºóÏµÍ³£º´ÓÖ´ĞĞÆ÷¶¯×÷µ½´«¸ĞÆ÷ÓĞÃ÷ÏÔÑÓ³ÙµÄÏµÍ³£¨±ÈÈç´óĞÍ¼ÓÈÈÂ¯£©¡£
-    /// ¶Ô°²È«ĞÔÒªÇó¼«¸ß¡¢²»ÔÊĞí²úÉú¾çÁÒÕğµ´µÄ¹¤ÒµÏÖ³¡¡£
+    /// æ§åˆ¶é£æ ¼ï¼šä¿å®ˆã€å¹³ç¨³ã€é«˜é²æ£’æ€§ã€‚
+    /// ç‰¹ç‚¹ï¼šè®¡ç®—å‡ºçš„æ¯”ä¾‹ç³»æ•° (K_p) è¾ƒå°ï¼Œç§¯åˆ†æ—¶é—´æ›´é•¿ã€‚å®ƒçš„ç›®æ ‡æ˜¯å°½é‡ä¸äº§ç”Ÿè¶…è°ƒï¼Œæˆ–è€…äº§ç”Ÿæå°çš„è¶…è°ƒï¼Œè®©ç³»ç»Ÿå¹³æ»‘åœ°åˆ°è¾¾ç›®æ ‡å€¼ã€‚
+    /// é€‚ç”¨åœºæ™¯ï¼š
+    /// æ¸©åº¦æ§åˆ¶ï¼ˆå¼ºçƒˆæ¨èï¼‰ï¼šå› ä¸ºå¤§å¤šæ•°åŠ çƒ­ç³»ç»Ÿâ€œå‡æ¸©å®¹æ˜“é™æ¸©éš¾â€ï¼Œä¸€æ—¦è¶…è°ƒï¼Œåªèƒ½é è‡ªç„¶æ•£çƒ­ï¼Œæ¢å¤ææ…¢ã€‚T-L æ³•èƒ½å®Œç¾é¿å…è¿™ç§éº»çƒ¦ã€‚
+    /// å¤§çº¯æ»åç³»ç»Ÿï¼šä»æ‰§è¡Œå™¨åŠ¨ä½œåˆ°ä¼ æ„Ÿå™¨æœ‰æ˜æ˜¾å»¶è¿Ÿçš„ç³»ç»Ÿï¼ˆæ¯”å¦‚å¤§å‹åŠ çƒ­ç‚‰ï¼‰ã€‚
+    /// å¯¹å®‰å…¨æ€§è¦æ±‚æé«˜ã€ä¸å…è®¸äº§ç”Ÿå‰§çƒˆéœ‡è¡çš„å·¥ä¸šç°åœºã€‚
     /// </summary>
     TyreusLuybenPid,
 
     /// <summary>
-    /// ¿ØÖÆ·ç¸ñ£º¿¹Ôë¡¢ÎÂºÍ¡£
-    /// ÌØµã£ºÎ¢·ÖÏî ($K_d$) ¶ÔĞÅºÅµÄ¡°±ä»¯ÂÊ¡±¼«ÆäÃô¸Ğ¡£Èç¹ûÄãµÄ´«¸ĞÆ÷Êı¾İÓĞÏ¸Î¢µÄ¶¶¶¯»ò¸ßÆµÔëÉù£¨±ÈÈçË®²¨ÎÆµ¼ÖÂÒºÎ»¼ÆÌø¶¯£©£¬D Ïî»á°ÑÕâĞ©ÔëÉù·Å´óÎŞÊı±¶£¬µ¼ÖÂ¼ÌµçÆ÷»ò·§ÃÅ·è¿ñ¿ªºÏ¡£PI ¹æÔò³¹µ×È¥µôÁË D Ïî£¬Ö»ÓÃ P ºÍ I À´¿ØÖÆ¡£
-    /// ÊÊÓÃ³¡¾°£º
-    /// ´«¸ĞÆ÷ÔëÉù¼«´óµÄÏµÍ³£ºÈç¹ûÄãµÄ rawTemperature Ìø¶¯ºÜÀ÷º¦£¬¼´Ê¹ÂË²¨ºóÒ²²»Ì«°²·Ö¡£
-    /// Á÷Á¿¿ØÖÆ / ÒºÎ»¿ØÖÆ£ºÁ÷ÌåÏµÍ³ÌìÉú°éËæÍÄÁ÷ºÍ²¨¶¯£¬ĞĞÒµÄÚÍ¨³£Ö»ÓÃ PI ¿ØÖÆ¡£
-    /// µ±Äã·¢ÏÖ PID ¿ØÖÆÆ÷ÈÃÖ´ĞĞÆ÷£¨Èç¹ÌÌ¬¼ÌµçÆ÷ SSR¡¢·§ÃÅ£©¶¯×÷¹ıÓÚÆµ·±ÇÒ¾çÁÒÊ±£¬½µ¼¶Ê¹ÓÃ PI ÊÇ×îºÃµÄ½â·¨¡£
+    /// æ§åˆ¶é£æ ¼ï¼šæŠ—å™ªã€æ¸©å’Œã€‚
+    /// ç‰¹ç‚¹ï¼šå¾®åˆ†é¡¹ ($K_d$) å¯¹ä¿¡å·çš„â€œå˜åŒ–ç‡â€æå…¶æ•æ„Ÿã€‚å¦‚æœä½ çš„ä¼ æ„Ÿå™¨æ•°æ®æœ‰ç»†å¾®çš„æŠ–åŠ¨æˆ–é«˜é¢‘å™ªå£°ï¼ˆæ¯”å¦‚æ°´æ³¢çº¹å¯¼è‡´æ¶²ä½è®¡è·³åŠ¨ï¼‰ï¼ŒD é¡¹ä¼šæŠŠè¿™äº›å™ªå£°æ”¾å¤§æ— æ•°å€ï¼Œå¯¼è‡´ç»§ç”µå™¨æˆ–é˜€é—¨ç–¯ç‹‚å¼€åˆã€‚PI è§„åˆ™å½»åº•å»æ‰äº† D é¡¹ï¼Œåªç”¨ P å’Œ I æ¥æ§åˆ¶ã€‚
+    /// é€‚ç”¨åœºæ™¯ï¼š
+    /// ä¼ æ„Ÿå™¨å™ªå£°æå¤§çš„ç³»ç»Ÿï¼šå¦‚æœä½ çš„ rawTemperature è·³åŠ¨å¾ˆå‰å®³ï¼Œå³ä½¿æ»¤æ³¢åä¹Ÿä¸å¤ªå®‰åˆ†ã€‚
+    /// æµé‡æ§åˆ¶ / æ¶²ä½æ§åˆ¶ï¼šæµä½“ç³»ç»Ÿå¤©ç”Ÿä¼´éšæ¹æµå’Œæ³¢åŠ¨ï¼Œè¡Œä¸šå†…é€šå¸¸åªç”¨ PI æ§åˆ¶ã€‚
+    /// å½“ä½ å‘ç° PID æ§åˆ¶å™¨è®©æ‰§è¡Œå™¨ï¼ˆå¦‚å›ºæ€ç»§ç”µå™¨ SSRã€é˜€é—¨ï¼‰åŠ¨ä½œè¿‡äºé¢‘ç¹ä¸”å‰§çƒˆæ—¶ï¼Œé™çº§ä½¿ç”¨ PI æ˜¯æœ€å¥½çš„è§£æ³•ã€‚
     /// </summary>
     ZieglerNicholsPi
 }
@@ -608,7 +608,7 @@ public sealed class TemperaturePidController
     private float _lastInput;
     private bool _hasLastInput;
     private float _lastOutput;
-    private long _lastTickMs;//¼ÇÂ¼ÉÏÒ»´Î¼ÆËãµÄ Tick
+    private long _lastTickMs;//è®°å½•ä¸Šä¸€æ¬¡è®¡ç®—çš„ Tick
     public float Kp { get; set; } = 8;
     public float Ki { get; set; } = 0.4f;
     public float Kd { get; set; } = 10;
@@ -636,7 +636,7 @@ public sealed class TemperaturePidController
     {
         float dtSeconds = (currentTickMs - _lastTickMs) / 1000f;
 
-        // Èç¹ûÊ±¼äÃ»ÓĞÍÆ½ø£¨ÀıÈçÔÚÍ¬Ò»ºÁÃëÄÚ±»µ÷ÓÃÁËÁ½´Î£©£¬Ö±½Ó·µ»ØÉÏÒ»´ÎµÄÖµ£¬·ÀÖ¹³ıÒÔ 0
+        // å¦‚æœæ—¶é—´æ²¡æœ‰æ¨è¿›ï¼ˆä¾‹å¦‚åœ¨åŒä¸€æ¯«ç§’å†…è¢«è°ƒç”¨äº†ä¸¤æ¬¡ï¼‰ï¼Œç›´æ¥è¿”å›ä¸Šä¸€æ¬¡çš„å€¼ï¼Œé˜²æ­¢é™¤ä»¥ 0
         if (dtSeconds <= 0)
             return _lastOutput;
 
@@ -650,17 +650,17 @@ public sealed class TemperaturePidController
         }
 
         float rawError = Setpoint - currentTemperature;
-        float activeError = CalculateActiveError(rawError); // ±ÜÃâËÀÇøÌø±ä
+        float activeError = CalculateActiveError(rawError); // é¿å…æ­»åŒºè·³å˜
 
-        // ±ÈÀıÏî
+        // æ¯”ä¾‹é¡¹
         float p = Kp * activeError;
 
-        // »ı·ÖÏî
+        // ç§¯åˆ†é¡¹
         if (Math.Abs(activeError) <= IntegralSeparationBand)
         {
             float iDelta = Ki * activeError * dtSeconds;
 
-            // ¿¹»ı·Ö±¥ºÍ
+            // æŠ—ç§¯åˆ†é¥±å’Œ
             bool isSaturated = (_lastOutput >= OutputMax && iDelta > 0) ||
                 (_lastOutput <= OutputMin && iDelta < 0);
 
@@ -671,11 +671,11 @@ public sealed class TemperaturePidController
             }
         }
 
-        // Î¢·ÖÏî
+        // å¾®åˆ†é¡¹
         float d = 0;
         if (_hasLastInput)
         {
-            // Î¢·ÖÏÈĞĞ£¬¿¹Éè¶¨ÖµÌø±ä
+            // å¾®åˆ†å…ˆè¡Œï¼ŒæŠ—è®¾å®šå€¼è·³å˜
             float dInput = (currentTemperature - _lastInput) / dtSeconds;
             d = -Kd * dInput;
         }
@@ -683,7 +683,7 @@ public sealed class TemperaturePidController
         float rawOutput = p + _integral + d;
         rawOutput = Math.Clamp(rawOutput, OutputMin, OutputMax);
 
-        // ÏŞÖÆ±ä»¯ÂÊ
+        // é™åˆ¶å˜åŒ–ç‡
         float finalOutput = ApplyRampLimit(_lastOutput, rawOutput, dtSeconds);
         _lastOutput = Math.Clamp(finalOutput, OutputMin, OutputMax);
         _lastInput = currentTemperature;
@@ -700,7 +700,7 @@ public sealed class TemperaturePidController
         _lastOutput = Math.Clamp(currentOutput, OutputMin, OutputMax);
         _lastTickMs = currentTickMs;
 
-        // Ê¹ÓÃÍêÈ«Ò»ÖÂµÄÓĞĞ§Îó²î½øĞĞ·´Ëã£¬ÊµÏÖ¾ø¶ÔµÄÎŞÈÅÇĞ»»
+        // ä½¿ç”¨å®Œå…¨ä¸€è‡´çš„æœ‰æ•ˆè¯¯å·®è¿›è¡Œåç®—ï¼Œå®ç°ç»å¯¹çš„æ— æ‰°åˆ‡æ¢
         float rawError = Setpoint - currentTemperature;
         float activeError = CalculateActiveError(rawError);
         float p = Kp * activeError;
@@ -716,7 +716,7 @@ public sealed class TemperaturePidController
 
     private float CalculateActiveError(float rawError)
     {
-        // Á¬ĞøËÀÇøËã·¨£º½«×ø±êÖáÆ½ÒÆ£¬±ÜÃâ¿çÔ½ËÀÇøÊ± P ÏîÍ»±ä
+        // è¿ç»­æ­»åŒºç®—æ³•ï¼šå°†åæ ‡è½´å¹³ç§»ï¼Œé¿å…è·¨è¶Šæ­»åŒºæ—¶ P é¡¹çªå˜
         if (rawError > DeadBand) return rawError - DeadBand;
         if (rawError < -DeadBand) return rawError + DeadBand;
         return 0;
@@ -744,7 +744,7 @@ public sealed class TimeProportioningOutput
         set
         {
             if (value <= TimeSpan.Zero)
-                throw new ArgumentOutOfRangeException(nameof(value), "CycleTime ±ØĞë´óÓÚ 0¡£");
+                throw new ArgumentOutOfRangeException(nameof(value), "CycleTime å¿…é¡»å¤§äº 0ã€‚");
             _cycleTimeMs = value.TotalMilliseconds;
         }
     }
@@ -768,22 +768,22 @@ public sealed class TimeProportioningOutput
 
     public bool GetOutputState(long currentTickMs)
     {
-        // ±ß½ç¼«ÖµÓ²¶ÌÂ·
+        // è¾¹ç•Œæå€¼ç¡¬çŸ­è·¯
         if (_outputPercent <= 0f) return false;
         if (_outputPercent >= 100f) return true;
         long elapsedMs = currentTickMs - _cycleStartTick;
 
-        // ¼ÆËãµ±Ç°ÖÜÆÚÄÚµÄ¾«È·Î»ÖÃ
+        // è®¡ç®—å½“å‰å‘¨æœŸå†…çš„ç²¾ç¡®ä½ç½®
         double currentPositionMs = elapsedMs % _cycleTimeMs;
 
-        // ÍÆ½øÖÜÆÚÆğµã£¬·ÀÖ¹ elapsedMs ÎŞÏŞÔö´óµ¼ÖÂ¸¡µã¾«¶ÈÊÜËğ
+        // æ¨è¿›å‘¨æœŸèµ·ç‚¹ï¼Œé˜²æ­¢ elapsedMs æ— é™å¢å¤§å¯¼è‡´æµ®ç‚¹ç²¾åº¦å—æŸ
         if (elapsedMs >= _cycleTimeMs)
         {
             long cyclesPassed = (long)(elapsedMs / _cycleTimeMs);
             _cycleStartTick += (long)(cyclesPassed * _cycleTimeMs);
         }
 
-        // ¼ÆËãµ¼Í¨ãĞÖµ
+        // è®¡ç®—å¯¼é€šé˜ˆå€¼
         double onMs = _cycleTimeMs * _outputPercent / 100.0;
         return currentPositionMs < onMs;
     }
@@ -802,7 +802,7 @@ public sealed class RelayAutoTuneOptions
     public double MinOscillationAmplitude { get; set; } = 0.2;
     public double MaxOscillationAmplitude { get; set; } = 20.0;
     public TimeSpan MinPeakInterval { get; set; } = TimeSpan.FromSeconds(2);
-    public double ConvergenceDeviation { get; set; } = 0.25; //ÊÕÁ²Æ«Àë¶ÈãĞÖµ
+    public double ConvergenceDeviation { get; set; } = 0.25; //æ”¶æ•›åç¦»åº¦é˜ˆå€¼
     public AutoTuneRule Rule { get; set; } = AutoTuneRule.TyreusLuybenPid;
 }
 public sealed class PidTuneResult
@@ -829,12 +829,12 @@ internal sealed class PeakPoint
 
 #region Relay Auto Tuner
 /// <summary>
-/// ÎÂ¿Ø¼Ìµç×ÔÕû¶¨Æ÷
-/// Ê¹ÓÃ·½Ê½£º
+/// æ¸©æ§ç»§ç”µè‡ªæ•´å®šå™¨
+/// ä½¿ç”¨æ–¹å¼ï¼š
 /// 1. Start()
-/// 2. ÖÜÆÚĞÔµ÷ÓÃ Update(rawTemp, filteredTemp, utcNow)
-/// 3. ¶ÁÈ¡ CurrentOutputPercent Êä³öµ½Ö´ĞĞÆ÷
-/// 4. µ± Status ±äÎª Succeeded / Failed / Cancelled Ê±½áÊø
+/// 2. å‘¨æœŸæ€§è°ƒç”¨ Update(rawTemp, filteredTemp, utcNow)
+/// 3. è¯»å– CurrentOutputPercent è¾“å‡ºåˆ°æ‰§è¡Œå™¨
+/// 4. å½“ Status å˜ä¸º Succeeded / Failed / Cancelled æ—¶ç»“æŸ
 /// </summary>
 public sealed class RelayAutoTuner
 {
@@ -926,10 +926,10 @@ public sealed class RelayAutoTuner
         HandleRelaySwitch(filteredTemperature);
         DetectPeak(filteredTemperature, currentTickMs);
 
-        // ÏÈÅĞ¶ÏÊÇ·ñ´ïµ½µÈ·ùÊÕÁ²×´Ì¬
+        // å…ˆåˆ¤æ–­æ˜¯å¦è¾¾åˆ°ç­‰å¹…æ”¶æ•›çŠ¶æ€
         if (CheckConvergence(out float stableAmplitude, out float stablePu))
         {
-            // ÅĞ¶ÏÕñ·ùÊÇ·ñÔÚ°²È«µÄÎïÀí·¶Î§ÄÚ
+            // åˆ¤æ–­æŒ¯å¹…æ˜¯å¦åœ¨å®‰å…¨çš„ç‰©ç†èŒƒå›´å†…
             if (CheckAmplitudeLimits(stableAmplitude, stablePu))
             {
                 Complete(stableAmplitude, stablePu);
@@ -1031,11 +1031,11 @@ public sealed class RelayAutoTuner
         if (_options == null || _peaks.Count < _options.RequiredPeakCount)
             return false;
 
-        // ÌŞ³ı×îºóÒ»¸öÎ´¶¨ĞÍµÄ²¨·å
+        // å‰”é™¤æœ€åä¸€ä¸ªæœªå®šå‹çš„æ³¢å³°
         int endIndex = _peaks.Count - 2;
         int checkCount = Math.Min(6, endIndex);
 
-        // È·±£ÆğµãµÄË÷ÒıÖÁÉÙÎª 2£¬³¹µ×±Ü¿ª²»¿É¿¿µÄ _peaks[0] ºÍÓÉÆä¼ÆËã³öµÄµÚÒ»¸öÕñ·ù
+        // ç¡®ä¿èµ·ç‚¹çš„ç´¢å¼•è‡³å°‘ä¸º 2ï¼Œå½»åº•é¿å¼€ä¸å¯é çš„ _peaks[0] å’Œç”±å…¶è®¡ç®—å‡ºçš„ç¬¬ä¸€ä¸ªæŒ¯å¹…
         int startIndex = Math.Max(2, endIndex - checkCount + 1);
         List<float> recentAmplitudes = new();
         for (int i = startIndex; i <= endIndex; i++)
@@ -1046,12 +1046,12 @@ public sealed class RelayAutoTuner
             return false;
         float avgAmp = recentAmplitudes.Average();
 
-        // ¼ÆËã×î´óÆ«Àë¶È£¬²¢Ê¹ÓÃ Options ÖĞµÄÅäÖÃÖµ½øĞĞÅĞ¶Ï
+        // è®¡ç®—æœ€å¤§åç¦»åº¦ï¼Œå¹¶ä½¿ç”¨ Options ä¸­çš„é…ç½®å€¼è¿›è¡Œåˆ¤æ–­
         float maxDevRatio = recentAmplitudes.Max(a => Math.Abs(a - avgAmp) / avgAmp);
         if (maxDevRatio > _options.ConvergenceDeviation)
             return false;
 
-        // ÌáÈ¡ÎÈÌ¬ÖÜÆÚ
+        // æå–ç¨³æ€å‘¨æœŸ
         List<float> recentPeriods = new();
         for (int i = startIndex; i <= endIndex - 2; i++)
         {
@@ -1167,6 +1167,7 @@ public sealed class RelayAutoTuner
 public sealed class TempControllerSnapshot
 {
     public required string Name { get; init; }
+    public required TempControllerState TargetMode { get; init; }
     public required TempControllerState State { get; init; }
     public required TempControllerAlarmState AlarmState { get; init; } = new();
     public required float RawTemperature { get; init; }

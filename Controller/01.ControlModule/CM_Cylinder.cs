@@ -23,7 +23,7 @@ public class CM_Cylinder : S88ControlModuleBase
     }
 
     // ==========================================
-    // ...
+    // S88ControlModuleBase重写接口
     // ==========================================
     public override bool HasAnyWarning => AlarmState.HasAnyWarning;
     public override bool HasAnyError => State == CylinderState.Error;
@@ -432,25 +432,25 @@ public sealed class CylinderAlarmState
 
 public static class CylinderEvents
 {
-    public static readonly EventBase InfoClearStats = new() { EventId = 100, Severity = SeverityLevel.Info, MessageTemplate = "动作次数累计清零" };
-    public static readonly EventBase InfoCmdRetract = new() { EventId = 101, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始缩回" };
-    public static readonly EventBase InfoCmdExtend = new() { EventId = 102, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始伸出" };
-    public static readonly EventBase InfoReset = new() { EventId = 103, Severity = SeverityLevel.Info, MessageTemplate = "故障复位" };
-    public static readonly EventBase InfoExtendedDone = new() { EventId = 104, Severity = SeverityLevel.Info, MessageTemplate = "伸出到位 (耗时 {0} ms)" };
-    public static readonly EventBase InfoRetractedDone = new() { EventId = 105, Severity = SeverityLevel.Info, MessageTemplate = "缩回到位 (耗时 {0} ms)" };
-    public static readonly EventBase InfoExtSensorLost = new() { EventId = 106, Severity = SeverityLevel.Info, MessageTemplate = "伸出位信号丢失，尝试维持" };
-    public static readonly EventBase InfoRetSensorLost = new() { EventId = 107, Severity = SeverityLevel.Info, MessageTemplate = "缩回位信号丢失，尝试维持" };
+    public static readonly EventBase InfoClearStats = new() { EventId = 700, Severity = SeverityLevel.Info, MessageTemplate = "动作次数累计清零" };
+    public static readonly EventBase InfoCmdRetract = new() { EventId = 701, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始缩回" };
+    public static readonly EventBase InfoCmdExtend = new() { EventId = 702, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始伸出" };
+    public static readonly EventBase InfoReset = new() { EventId = 703, Severity = SeverityLevel.Info, MessageTemplate = "故障复位完成" };
+    public static readonly EventBase InfoExtendedDone = new() { EventId = 704, Severity = SeverityLevel.Info, MessageTemplate = "伸出到位 (耗时 {0} ms)" };
+    public static readonly EventBase InfoRetractedDone = new() { EventId = 705, Severity = SeverityLevel.Info, MessageTemplate = "缩回到位 (耗时 {0} ms)" };
+    public static readonly EventBase InfoExtSensorLost = new() { EventId = 706, Severity = SeverityLevel.Info, MessageTemplate = "伸出位信号丢失，尝试维持" };
+    public static readonly EventBase InfoRetSensorLost = new() { EventId = 707, Severity = SeverityLevel.Info, MessageTemplate = "缩回位信号丢失，尝试维持" };
 
-    public static readonly EventBase ErrRetractInterlock = new() { EventId = 120, Severity = SeverityLevel.Error, MessageTemplate = "无法缩回：外部联锁不满足" };
-    public static readonly EventBase ErrExtendInterlock = new() { EventId = 121, Severity = SeverityLevel.Error, MessageTemplate = "无法伸出：外部联锁不满足" };
-    public static readonly EventBase ErrSensorConflict = new() { EventId = 122, Severity = SeverityLevel.Error, MessageTemplate = "传感器异常：原位和动位传感器同时亮" };
-    public static readonly EventBase ErrExtendInterlockLost = new() { EventId = 123, Severity = SeverityLevel.Error, MessageTemplate = "伸出动作中联锁丢失" };
-    public static readonly EventBase ErrExtendTimeout = new() { EventId = 124, Severity = SeverityLevel.Error, MessageTemplate = "伸出动作超时 (> {0} ms)" };
-    public static readonly EventBase ErrRetractInterlockLost = new() { EventId = 125, Severity = SeverityLevel.Error, MessageTemplate = "缩回动作中联锁丢失" };
-    public static readonly EventBase ErrRetractTimeout = new() { EventId = 126, Severity = SeverityLevel.Error, MessageTemplate = "缩回动作超时 (> {0} ms)" };
-    public static readonly EventBase ErrExtendKeepInterlockLost = new() { EventId = 127, Severity = SeverityLevel.Error, MessageTemplate = "伸出保持中联锁丢失" };
-    public static readonly EventBase ErrRetractKeepInterlockLost = new() { EventId = 128, Severity = SeverityLevel.Error, MessageTemplate = "缩回保持中联锁丢失" };
-    public static readonly EventBase WarningLifetimeReached = new() { EventId = 140, Severity = SeverityLevel.Warning, MessageTemplate = "寿命到达 (PV:{0} , SP:{1})" };
+    public static readonly EventBase ErrRetractInterlock = new() { EventId = 720, Severity = SeverityLevel.Error, MessageTemplate = "无法缩回：外部联锁不满足" };
+    public static readonly EventBase ErrExtendInterlock = new() { EventId = 721, Severity = SeverityLevel.Error, MessageTemplate = "无法伸出：外部联锁不满足" };
+    public static readonly EventBase ErrSensorConflict = new() { EventId = 722, Severity = SeverityLevel.Error, MessageTemplate = "传感器异常：原位和动位传感器同时亮" };
+    public static readonly EventBase ErrExtendInterlockLost = new() { EventId = 723, Severity = SeverityLevel.Error, MessageTemplate = "伸出动作中联锁丢失" };
+    public static readonly EventBase ErrExtendTimeout = new() { EventId = 724, Severity = SeverityLevel.Error, MessageTemplate = "伸出动作超时 (> {0} ms)" };
+    public static readonly EventBase ErrRetractInterlockLost = new() { EventId = 725, Severity = SeverityLevel.Error, MessageTemplate = "缩回动作中联锁丢失" };
+    public static readonly EventBase ErrRetractTimeout = new() { EventId = 726, Severity = SeverityLevel.Error, MessageTemplate = "缩回动作超时 (> {0} ms)" };
+    public static readonly EventBase ErrExtendKeepInterlockLost = new() { EventId = 727, Severity = SeverityLevel.Error, MessageTemplate = "伸出保持中联锁丢失" };
+    public static readonly EventBase ErrRetractKeepInterlockLost = new() { EventId = 728, Severity = SeverityLevel.Error, MessageTemplate = "缩回保持中联锁丢失" };
+    public static readonly EventBase WarningLifetimeReached = new() { EventId = 740, Severity = SeverityLevel.Warning, MessageTemplate = "寿命到达 (PV:{0} , SP:{1})" };
 }
 
 public sealed class CylinderSnapshot

@@ -457,6 +457,7 @@ public class EM_Lid : S88EquipmentModuleBase
                 return new()
                 {
                     Alarm = errorCode != 0,
+                    ErrorCode = errorCode,
                     ServoOn = stateMachine == 4,
                     Homed = homeState == 1,
                     Moving = LTDMC.dmc_check_done(0, axisId) == 0,

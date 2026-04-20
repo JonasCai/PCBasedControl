@@ -3,12 +3,15 @@ using Controller.EventLogger;
 using Controller.gRPC;
 using Controller.S88;
 using System.Collections.Concurrent;
+using System;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Controller._01.ControlModule;
 
 public class CM_Valve : S88ControlModuleBase
 {
-    public CM_Valve(ValveCfg cfg, IEventProducer eventProducer, ILogger<CM_Valve> logger) : base(cfg.Name, eventProducer, logger)
+    public CM_Valve(IEventProducer eventProducer, ValveCfg cfg, ILogger<CM_Valve> logger) : base(cfg.Name, eventProducer, logger)
     {
         _cfg = cfg;
         RegisterCommandHandlers();
@@ -19,12 +22,11 @@ public class CM_Valve : S88ControlModuleBase
         _closeSensorFilter = new DigitalDebouncer(debounceTime);
 
         if (!_cfg.Validate())
-            throw new ArgumentException($"阀[{_cfg.Name}]配置不完整", nameof(_cfg));
+            throw new ArgumentException($"阀门[{_cfg.Name}]配置不完整", nameof(_cfg));
     }
 
-
     // ==========================================
-    // ...
+    // S88ControlModuleBase重写接口
     // ==========================================
     public override bool HasAnyWarning => AlarmState.HasAnyWarning;
     public override bool HasAnyError => State == ValveState.Error;
@@ -53,14 +55,14 @@ public class CM_Valve : S88ControlModuleBase
 
             case ValveSensorConfig.OpenOnly:
                 _isOpen = _physicalOpen;
-                // 伸出位传感器熄灭 + 处于缩回状态/或正在缩回且时间达标
+                // 打开位传感器熄灭 + 处于关闭状态/或正在关闭且时间达标
                 _isClosed = !_physicalOpen && (State == ValveState.Closed ||
                               (State == ValveState.ToCloseBusy && _toCloseElapsedTime >= _cfg.VirtualClosedDelayMs));
                 break;
 
             case ValveSensorConfig.ClosedOnly:
                 _isClosed = _physicalClosed;
-                // 缩回位传感器熄灭 + 处于伸出状态/或正在伸出且时间达标
+                // 关闭位传感器熄灭 + 处于打开状态/或正在打开且时间达标
                 _isOpen = !_physicalClosed && (State == ValveState.Open ||
                               (State == ValveState.ToOpenBusy && _toOpenElapsedTime >= _cfg.VirtualOpenDelayMs));
                 break;
@@ -75,45 +77,71 @@ public class CM_Valve : S88ControlModuleBase
         // 处理指令队列
         ProcessCommandQueue();
 
-        // 评估所有物理状态并触发/解除报警
-        EvaluateAlarms(_isOpen, _isClosed);
+        // 硬件安全遮罩：如果处于 Error 态，拦截除 ToSafe 以外的所有新物理动作
+        if (State == ValveState.Error && _targetCmd != ValveCmd.ToSafe)
+        {
+            // 处于故障态时，维持发生故障那一刻的物理输出，不响应新意图
+        }
+        else
+        {
+            switch (_targetCmd)
+            {
+                case ValveCmd.ToSafe:
+                    _cfg.Actuate(ValveCmd.ToSafe);
+                    break;
+                case ValveCmd.ToClose:
+                    _cfg.Actuate(ValveCmd.ToClose);
+                    break;
+                case ValveCmd.ToOpen:
+                    _cfg.Actuate(ValveCmd.ToOpen);
+                    break;
+            }
+        }
 
-        // 状态机
+        // 状态机推演
         switch (State)
         {
             case ValveState.Unknown:
-                _cfg.Actuate(ValveCmd.ToSafe);
-                if (_isOpen) ChangeState(ValveState.Open);
-                else if (_isClosed) ChangeState(ValveState.Closed);
+                if (_isOpen && !_isClosed) ChangeState(ValveState.Open);
+                else if (!_isOpen && _isClosed) ChangeState(ValveState.Closed);
+                // 如果意图是打开，或者意图是ToSafe且机械常态是常开
+                else if (_targetCmd == ValveCmd.ToOpen ||
+                        (_targetCmd == ValveCmd.ToSafe && _cfg.SafePhysicalState == ValveState.Open))
+                {
+                    ChangeState(ValveState.ToOpenBusy);
+                    _toOpenStartTimestampMs = _currentTimestampMs;
+                }
+                // 如果意图是关闭，或者意图是ToSafe且机械常态是常闭
+                else if (_targetCmd == ValveCmd.ToClose ||
+                        (_targetCmd == ValveCmd.ToSafe && _cfg.SafePhysicalState == ValveState.Closed))
+                {
+                    ChangeState(ValveState.ToCloseBusy);
+                    _toCloseStartTimestampMs = _currentTimestampMs;
+                }
+                // 如果 SafePhysicalState 是 Unknown (双电控阀掉电保持原位)，它就老老实实呆在 Unknown 等待传感器
                 break;
 
             case ValveState.ToOpenBusy:
-                // 动作保持
-                _cfg.Actuate(ValveCmd.ToOpen);
                 _toOpenElapsedTime = _currentTimestampMs - _toOpenStartTimestampMs;
                 if (_isOpen)
                 {
                     _openCount++;
                     ChangeState(ValveState.Open);
-                    RaiseInfo(ValveEvents.InfoOpenDone, _toOpenElapsedTime); //伸出到位 (耗时 {ToOpenElapsedTime} ms
+                    RaiseInfo(ValveEvents.InfoOpenDone, _toOpenElapsedTime);
                 }
                 break;
 
             case ValveState.ToCloseBusy:
-                // 动作保持
-                _cfg.Actuate(ValveCmd.ToClose);
                 _toCloseElapsedTime = _currentTimestampMs - _toCloseStartTimestampMs;
                 if (_isClosed)
                 {
                     _closeCount++;
                     ChangeState(ValveState.Closed);
-                    RaiseInfo(ValveEvents.InfoClosedDone, _toCloseElapsedTime); //缩回到位 (耗时 {ToCloseElapsedTime} ms
+                    RaiseInfo(ValveEvents.InfoClosedDone, _toCloseElapsedTime);
                 }
                 break;
 
             case ValveState.Open:
-                // 动作保持 (尤其是单电控气缸需要持续给电，双电控也建议保持)
-                _cfg.Actuate(ValveCmd.ToOpen);
                 // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
                 if (!_isOpen)
                 {
@@ -124,12 +152,10 @@ public class CM_Valve : S88ControlModuleBase
                 break;
 
             case ValveState.Closed:
-                // 动作保持
-                _cfg.Actuate(ValveCmd.ToClose);
                 // 如果信号丢失且没发生联锁错误，重新以此目标触发动作
                 if (!_isClosed)
                 {
-                    RaiseInfo(ValveEvents.InfoCloseSensorLost); //缩回位信号丢失，尝试重新检测
+                    RaiseInfo(ValveEvents.InfoCloseSensorLost);
                     ChangeState(ValveState.ToCloseBusy);
                     _toCloseStartTimestampMs = _currentTimestampMs;
                 }
@@ -138,55 +164,71 @@ public class CM_Valve : S88ControlModuleBase
             case ValveState.Error:
                 break;
         }
+
+        // 统一的报警集中评估与映射
+        AlarmHandler();
     }
     public override void ToSafe()
     {
         PurgeCommands();
+        _targetCmd = ValveCmd.ToSafe;
         _cfg.Actuate(ValveCmd.ToSafe);
-        ChangeState(ValveState.Unknown);
-    }
 
+        if (State != ValveState.Error)
+        {
+            ChangeState(ValveState.Unknown);
+        }
+    }
 
     // ==========================================
     // 外部接口
     // ==========================================
-    public void MoveClose()
+    public void Close()
     {
-        if (State == ValveState.Closed || State == ValveState.ToCloseBusy || State == ValveState.Error)
+        if (State == ValveState.Closed || State == ValveState.ToCloseBusy)
             return;
 
         if (!_cfg.CanClose())
         {
-            AlarmState.CloseConditionsNotMet = true;
-            RaiseAlarm(ValveEvents.ErrCloseInterlock);
+            AlarmState.CloseInterlockError = true;
             return;
         }
 
-        RaiseInfo(ValveEvents.InfoCmdClose);//收到缩回指令，开始执行...
-        ChangeState(ValveState.ToCloseBusy);
-        _toCloseStartTimestampMs = _currentTimestampMs;
+        _targetCmd = ValveCmd.ToClose; 
+
+        if (State != ValveState.Error)
+        {
+            RaiseInfo(ValveEvents.InfoCmdClose);
+            ChangeState(ValveState.ToCloseBusy);
+            _toCloseStartTimestampMs = _currentTimestampMs;
+        }
     }
-    public void MoveOpen()
+    public void Open()
     {
-        if (State == ValveState.Open || State == ValveState.ToOpenBusy || State == ValveState.Error)
+        if (State == ValveState.Open || State == ValveState.ToOpenBusy)
             return;
 
         if (!_cfg.CanOpen())
         {
-            AlarmState.OpenConditionsNotMet = true;
-            RaiseAlarm(ValveEvents.ErrOpenInterlock);
+            AlarmState.OpenInterlockError = true;
             return;
         }
 
-        RaiseInfo(ValveEvents.InfoCmdOpen);//收到伸出指令，开始执行
-        ChangeState(ValveState.ToOpenBusy);
-        _toOpenStartTimestampMs = _currentTimestampMs;
+        _targetCmd = ValveCmd.ToOpen; 
+
+        if (State != ValveState.Error)
+        {
+            RaiseInfo(ValveEvents.InfoCmdOpen);
+            ChangeState(ValveState.ToOpenBusy);
+            _toOpenStartTimestampMs = _currentTimestampMs;
+        }
     }
     public ValveState State { get; private set; } = ValveState.Unknown;
     public ValveAlarmState AlarmState = new();
     public ValveSnapshot GetSnapshot() => new()
     {
         Name = _cfg.Name,
+        TargetCmd = _targetCmd,
         State = State,
         AlarmState = AlarmState,
         OpenSensor = _isOpen,
@@ -199,7 +241,6 @@ public class CM_Valve : S88ControlModuleBase
         CloseCnt = _closeCount
     };
 
-
     // ==========================================
     // 私有成员
     // ==========================================
@@ -208,356 +249,223 @@ public class CM_Valve : S88ControlModuleBase
     private DigitalDebouncer _openSensorFilter, _closeSensorFilter;
     private int _openCount, _closeCount;
     private bool _isOpen, _isClosed, _rawOpen, _rawClosed, _physicalOpen, _physicalClosed;
-    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
+    private ValveCmd _targetCmd = ValveCmd.ToSafe;
+
+    private void AlarmHandler()
     {
-        base.RaiseAlarm(eventbase, args);
+        AlarmState.LifeTimeReached = _openCount > _cfg.LifetimeSP;
 
-        if (eventbase.Severity == SeverityLevel.Error)
+        if (_isOpen && _isClosed) AlarmState.SensorConflict = true;
+
+        if (State == ValveState.ToOpenBusy && _toOpenElapsedTime > _cfg.ToOpenToutMs)
+            AlarmState.OpenTimeout = true;
+
+        if (State == ValveState.ToCloseBusy && _toCloseElapsedTime > _cfg.ToCloseToutMs)
+            AlarmState.CloseTimeout = true;
+
+        // 动态联锁丢失错误锁存
+        if (!_cfg.CanOpen() && _targetCmd != ValveCmd.ToSafe)
+        {
+            if (State == ValveState.ToOpenBusy) AlarmState.OpenInterlockLostError = true;
+            else if (State == ValveState.Open) AlarmState.OpenKeepInterlockLostError = true;
+        }
+
+        if (!_cfg.CanClose() && _targetCmd != ValveCmd.ToSafe)
+        {
+            if (State == ValveState.ToCloseBusy) AlarmState.CloseInterlockLostError = true;
+            else if (State == ValveState.Closed) AlarmState.CloseKeepInterlockLostError = true;
+        }
+
+        // 运行中联锁丢失，强制去安全位
+        if (AlarmState.OpenInterlockLostError || AlarmState.OpenKeepInterlockLostError ||
+            AlarmState.CloseInterlockLostError || AlarmState.CloseKeepInterlockLostError)
+        {
+            _targetCmd = ValveCmd.ToSafe;
+        }
+
+        if (AlarmState.LifeTimeReached) RaiseAlarm(ValveEvents.WarningLifetimeReached, _openCount, _cfg.LifetimeSP);
+        else TryClearAlarm(ValveEvents.WarningLifetimeReached);
+
+        if (AlarmState.SensorConflict) RaiseAlarm(ValveEvents.ErrSensorConflict);
+        else TryClearAlarm(ValveEvents.ErrSensorConflict);
+
+        if (AlarmState.OpenTimeout) RaiseAlarm(ValveEvents.ErrOpenTimeout, _cfg.ToOpenToutMs);
+        else TryClearAlarm(ValveEvents.ErrOpenTimeout);
+
+        if (AlarmState.CloseTimeout) RaiseAlarm(ValveEvents.ErrCloseTimeout, _cfg.ToCloseToutMs);
+        else TryClearAlarm(ValveEvents.ErrCloseTimeout);
+
+        if (AlarmState.OpenInterlockError) RaiseAlarm(ValveEvents.ErrOpenInterlock);
+        else TryClearAlarm(ValveEvents.ErrOpenInterlock);
+
+        if (AlarmState.OpenInterlockLostError) RaiseAlarm(ValveEvents.ErrOpenInterlockLost);
+        else TryClearAlarm(ValveEvents.ErrOpenInterlockLost);
+
+        if (AlarmState.OpenKeepInterlockLostError) RaiseAlarm(ValveEvents.ErrOpenKeepInterlockLost);
+        else TryClearAlarm(ValveEvents.ErrOpenKeepInterlockLost);
+
+        if (AlarmState.CloseInterlockError) RaiseAlarm(ValveEvents.ErrCloseInterlock);
+        else TryClearAlarm(ValveEvents.ErrCloseInterlock);
+
+        if (AlarmState.CloseInterlockLostError) RaiseAlarm(ValveEvents.ErrCloseInterlockLost);
+        else TryClearAlarm(ValveEvents.ErrCloseInterlockLost);
+
+        if (AlarmState.CloseKeepInterlockLostError) RaiseAlarm(ValveEvents.ErrCloseKeepInterlockLost);
+        else TryClearAlarm(ValveEvents.ErrCloseKeepInterlockLost);
+
+        if (AlarmState.HasAnyError && State != ValveState.Error)
+        {
             ChangeState(ValveState.Error);
-
+        }
     }
 
     private void Reset()
     {
         if (State != ValveState.Error) return;
 
-        if (!AlarmState.CloseConditionsNotMet)
+        if (!(_isOpen && _isClosed))
+            AlarmState.SensorConflict = false;
+
+        // 打开超时清除条件：已物理打开 或 目标意图已改变
+        if (_isOpen || _targetCmd != ValveCmd.ToOpen)
+            AlarmState.OpenTimeout = false;
+
+        // 关闭超时清除条件
+        if (_isClosed || _targetCmd != ValveCmd.ToClose)
+            AlarmState.CloseTimeout = false;
+
+        // 外部联锁条件恢复时 或 目标意图已改变，允许清除对应的联锁报警
+        if (_cfg.CanOpen() || _targetCmd != ValveCmd.ToOpen)
         {
-            TryClearAlarm(ValveEvents.ErrCloseInterlock);
-            TryClearAlarm(ValveEvents.ErrCloseInterlockLost);
-            TryClearAlarm(ValveEvents.ErrCloseKeepInterlockLost);
+            AlarmState.OpenInterlockLostError = false;
+            AlarmState.OpenKeepInterlockLostError = false;
         }
 
-        if (!AlarmState.OpenConditionsNotMet)
+        if (_cfg.CanClose() || _targetCmd != ValveCmd.ToClose)
         {
-            TryClearAlarm(ValveEvents.ErrOpenInterlock);
-            TryClearAlarm(ValveEvents.ErrOpenInterlockLost);
-            TryClearAlarm(ValveEvents.ErrOpenKeepInterlockLost);
+            AlarmState.CloseInterlockLostError = false;
+            AlarmState.CloseKeepInterlockLostError = false;
         }
 
-        if (!AlarmState.SensorConflict)
-        {
-            TryClearAlarm(ValveEvents.ErrSensorConflict);
-        }
+        AlarmState.CloseInterlockError = false;
+        AlarmState.OpenInterlockError = false;
 
-        // 无条件清除超时标志与报警，给系统重新尝试动作的机会。
-        AlarmState.OpenTimeout = false;
-        TryClearAlarm(ValveEvents.ErrOpenTimeout);
-
-        AlarmState.CloseTimeout = false;
-        TryClearAlarm(ValveEvents.ErrCloseTimeout);
-
+        // 如果所有的 Latch 都被成功清理，脱离 Error 态
         if (!AlarmState.HasAnyError)
         {
             ChangeState(ValveState.Unknown);
             RaiseInfo(ValveEvents.InfoReset);
         }
     }
+
     private void RegisterCommandHandlers()
     {
-        RegisterCommandHandler(Command.Open, cmd =>
-        {
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-            MoveOpen();
-        });
-
-        RegisterCommandHandler(Command.Close, cmd =>
-        {
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-            MoveClose();
-        });
-
-        RegisterCommandHandler(Command.Reset, cmd =>
-        {
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-            Reset();
-        });
-
-        RegisterCommandHandler(Command.ResetStatistics, cmd =>
-        {
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-            ResetStatistics();
-        });
+        RegisterCommandHandler(Command.Open, cmd => { Open(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty)); });
+        RegisterCommandHandler(Command.Close, cmd => { Close(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty)); });
+        RegisterCommandHandler(Command.Reset, cmd => { Reset(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty)); });
+        RegisterCommandHandler(Command.ResetStatistics, cmd => { ResetStatistics(); cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty)); });
     }
-    private void EvaluateAlarms(bool isOpen, bool isClosed)
-    {
-        //寿命检测
-        if (_openCount > _cfg.LifetimeSP)
-        {
-            AlarmState.LifeTimeReached = true;
-            RaiseAlarm(ValveEvents.WarningLifetimeReached, _openCount, _cfg.LifetimeSP);
-        }
-        else
-        {
-            AlarmState.LifeTimeReached = false;
-            TryClearAlarm(ValveEvents.WarningLifetimeReached);
-        }
 
-        // 传感器冲突检查
-        if (isOpen && isClosed)
-        {
-            AlarmState.SensorConflict = true;
-            RaiseAlarm(ValveEvents.ErrSensorConflict);
-        }
-        else
-        {
-            AlarmState.SensorConflict = false;
-        }
-
-        // 伸出联锁检查
-        if (!_cfg.CanOpen())
-        {
-            if (State == ValveState.ToOpenBusy)
-            {
-                AlarmState.OpenConditionsNotMet = true;
-                RaiseAlarm(ValveEvents.ErrOpenInterlockLost);
-            }
-            else if (State == ValveState.Open)
-            {
-                AlarmState.OpenConditionsNotMet = true;
-                RaiseAlarm(ValveEvents.ErrOpenKeepInterlockLost);
-            }
-        }
-        else
-        {
-            AlarmState.OpenConditionsNotMet = false;
-        }
-
-        // 缩回联锁检查
-        if (!_cfg.CanClose())
-        {
-            if (State == ValveState.ToCloseBusy)
-            {
-                AlarmState.CloseConditionsNotMet = true;
-                RaiseAlarm(ValveEvents.ErrCloseInterlockLost);
-            }
-            else if (State == ValveState.Closed)
-            {
-                AlarmState.CloseConditionsNotMet = true;
-                RaiseAlarm(ValveEvents.ErrCloseKeepInterlockLost);
-            }
-        }
-        else
-        {
-            AlarmState.CloseConditionsNotMet = false;
-        }
-
-        // 超时检查
-        if (State == ValveState.ToOpenBusy)
-        {
-            if (_toOpenElapsedTime > _cfg.ToOpenToutMs)
-            {
-                AlarmState.OpenTimeout = true;
-                RaiseAlarm(ValveEvents.ErrOpenTimeout, _cfg.ToOpenToutMs);
-            }
-        }
-        else if (isOpen || State == ValveState.ToCloseBusy || State == ValveState.Unknown)
-        {
-            AlarmState.OpenTimeout = false; // 物理条件恢复或目标改变
-        }
-
-        if (State == ValveState.ToCloseBusy)
-        {
-            if (_toCloseElapsedTime > _cfg.ToCloseToutMs)
-            {
-                AlarmState.CloseTimeout = true;
-                RaiseAlarm(ValveEvents.ErrCloseTimeout, _cfg.ToCloseToutMs);
-            }
-        }
-        else if (isClosed || State == ValveState.ToOpenBusy || State == ValveState.Unknown)
-        {
-            AlarmState.CloseTimeout = false;
-        }
-    }
     private void ChangeState(ValveState newState)
     {
         if (State == newState) return;
         State = newState;
     }
+
     private void ResetStatistics()
     {
         _openCount = 0;
         _closeCount = 0;
-        RaiseInfo(ValveEvents.InfoClearStats); //动作次数累计清零
+        RaiseInfo(ValveEvents.InfoClearStats);
+    }
+
+    protected override void RaiseAlarm(EventBase eventbase, params object[] args)
+    {
+        base.RaiseAlarm(eventbase, args);
+
+        if (eventbase.Severity == SeverityLevel.Error)
+            ChangeState(ValveState.Error);
     }
 }
 
-// 传感器配置类型
-public enum ValveSensorConfig
-{
-    DualSensors, // 标配：双传感器
-    OpenOnly,  // 只有打开位传感器
-    ClosedOnly, // 只有关闭位传感器
-    TimeBased    // 无传感器 (纯靠双向时间推算)
-}
+// ==============================================
+// 配置、枚举与事件定义
+// ==============================================
+public enum ValveSensorConfig { DualSensors, OpenOnly, ClosedOnly, TimeBased }
 
 public class ValveCfg
 {
     public required string Name { get; init; }
 
-    // 硬件形态配置
     public ValveSensorConfig SensorConfig { get; init; } = ValveSensorConfig.TimeBased;
 
-    // 虚拟行程推算时间 (当没有对应传感器时，指令下发后多久认为到位)
-    public int VirtualOpenDelayMs { get; init; } = 2000;
-    public int VirtualClosedDelayMs { get; init; } = 2000;
-
+    public int VirtualOpenDelayMs { get; init; } = 10;
+    public int VirtualClosedDelayMs { get; init; } = 10;
     public int ToOpenToutMs { get; init; } = 10000;
     public int ToCloseToutMs { get; init; } = 10000;
-    public int LifetimeSP { get; init; } = 1000000;
+    public int LifetimeSP { get; init; } = 4000000;
     public int SensorDebounceTimeMs { get; init; } = 50;
+    public ValveState SafePhysicalState { get; init; } = ValveState.Closed;
 
     public required Action<ValveCmd> Actuate { get; init; }
     public required Func<bool> CanOpen { get; init; }
     public required Func<bool> CanClose { get; init; }
-
     public Func<bool>? ReadOpenSensor { get; init; }
     public Func<bool>? ReadClosedSensor { get; init; }
 
     public bool Validate()
     {
         bool valid = !string.IsNullOrEmpty(Name) && Actuate != null && CanOpen != null && CanClose != null;
-
-        // 校验传感器配置是否与委托匹配
-        if (SensorConfig is ValveSensorConfig.DualSensors or ValveSensorConfig.OpenOnly)
-            valid &= ReadOpenSensor != null;
-
-        if (SensorConfig is ValveSensorConfig.DualSensors or ValveSensorConfig.ClosedOnly)
-            valid &= ReadClosedSensor != null;
-
+        if (SensorConfig is ValveSensorConfig.DualSensors or ValveSensorConfig.OpenOnly) valid &= ReadOpenSensor != null;
+        if (SensorConfig is ValveSensorConfig.DualSensors or ValveSensorConfig.ClosedOnly) valid &= ReadClosedSensor != null;
         return valid;
     }
 }
 
-public enum ValveCmd
-{
-    ToSafe,
-    ToClose,
-    ToOpen
-}
-
-public enum ValveState
-{
-    Unknown, // 未知
-    ToOpenBusy, // 伸出中
-    ToCloseBusy, // 缩回中
-    Open, // 已伸出
-    Closed, // 已缩回
-    Error // 故障
-}
+public enum ValveCmd { ToSafe, ToClose, ToOpen }
+public enum ValveState { Unknown, ToOpenBusy, ToCloseBusy, Open, Closed, Error }
 
 public sealed class ValveAlarmState
 {
     public bool LifeTimeReached { get; internal set; }
     public bool HasAnyWarning => LifeTimeReached;
-    public bool OpenConditionsNotMet { get; internal set; }
-    public bool CloseConditionsNotMet { get; internal set; }
+
+    public bool OpenInterlockError { get; internal set; }
+    public bool CloseInterlockError { get; internal set; }
+    public bool OpenInterlockLostError { get; internal set; }
+    public bool CloseInterlockLostError { get; internal set; }
+    public bool OpenKeepInterlockLostError { get; internal set; }
+    public bool CloseKeepInterlockLostError { get; internal set; }
+
     public bool OpenTimeout { get; internal set; }
     public bool CloseTimeout { get; internal set; }
     public bool SensorConflict { get; internal set; }
-    public bool HasAnyError => OpenConditionsNotMet || CloseConditionsNotMet || OpenTimeout || CloseTimeout || SensorConflict;
-    public override string ToString() => $"OpenConditionsNotMet={OpenConditionsNotMet}, CloseConditionsNotMet={CloseConditionsNotMet}, OpenTimeout={OpenTimeout}, CloseTimeout={CloseTimeout}, SensorConflict={SensorConflict}";
+
+    public bool HasAnyError => OpenInterlockError || CloseInterlockError ||
+                               OpenInterlockLostError || CloseInterlockLostError ||
+                               OpenKeepInterlockLostError || CloseKeepInterlockLostError ||
+                               OpenTimeout || CloseTimeout || SensorConflict;
 }
 
 public static class ValveEvents
 {
-    public static readonly EventBase InfoClearStats = new()
-    {
-        EventId = 100,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "动作次数累计清零"
-    };
-    public static readonly EventBase InfoCmdClose = new()
-    {
-        EventId = 101,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "指令:开始关闭"
-    };
-    public static readonly EventBase InfoCmdOpen = new()
-    {
-        EventId = 102,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "指令:开始打开"
-    };
-    public static readonly EventBase InfoReset = new()
-    {
-        EventId = 103,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "故障复位"
-    };
-    public static readonly EventBase InfoOpenDone = new()
-    {
-        EventId = 104,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "打开到位 (耗时 {0} ms)"
-    };
-    public static readonly EventBase InfoClosedDone = new()
-    {
-        EventId = 105,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "关闭到位 (耗时 {0} ms)"
-    };
-    public static readonly EventBase InfoOpenSensorLost = new()
-    {
-        EventId = 106,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "打开位信号丢失，尝试维持"
-    };
-    public static readonly EventBase InfoCloseSensorLost = new()
-    {
-        EventId = 107,
-        Severity = SeverityLevel.Info,
-        MessageTemplate = "关闭位信号丢失，尝试维持"
-    };
+    public static readonly EventBase InfoClearStats = new() { EventId = 100, Severity = SeverityLevel.Info, MessageTemplate = "动作次数累计清零" };
+    public static readonly EventBase InfoCmdClose = new() { EventId = 101, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始关闭" };
+    public static readonly EventBase InfoCmdOpen = new() { EventId = 102, Severity = SeverityLevel.Info, MessageTemplate = "指令:开始打开" };
+    public static readonly EventBase InfoReset = new() { EventId = 103, Severity = SeverityLevel.Info, MessageTemplate = "故障复位完成" };
+    public static readonly EventBase InfoOpenDone = new() { EventId = 104, Severity = SeverityLevel.Info, MessageTemplate = "打开到位 (耗时 {0} ms)" };
+    public static readonly EventBase InfoClosedDone = new() { EventId = 105, Severity = SeverityLevel.Info, MessageTemplate = "关闭到位 (耗时 {0} ms)" };
+    public static readonly EventBase InfoOpenSensorLost = new() { EventId = 106, Severity = SeverityLevel.Info, MessageTemplate = "打开位信号丢失，尝试维持" };
+    public static readonly EventBase InfoCloseSensorLost = new() { EventId = 107, Severity = SeverityLevel.Info, MessageTemplate = "关闭位信号丢失，尝试维持" };
 
-    public static readonly EventBase ErrCloseInterlock = new()
-    {
-        EventId = 120,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "无法关闭：外部联锁不满足"
-    };
-    public static readonly EventBase ErrOpenInterlock = new()
-    {
-        EventId = 121,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "无法打开：外部联锁不满足"
-    };
-    public static readonly EventBase ErrSensorConflict = new()
-    {
-        EventId = 122,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "传感器异常：关闭位和打开位传感器同时亮"
-    };
-    public static readonly EventBase ErrOpenInterlockLost = new()
-    {
-        EventId = 123,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "打开动作中联锁丢失"
-    };
-    public static readonly EventBase ErrOpenTimeout = new()
-    {
-        EventId = 124,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "打开动作超时 (> {0} ms)"
-    };
-    public static readonly EventBase ErrCloseInterlockLost = new()
-    {
-        EventId = 125,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "关闭动作中联锁丢失"
-    };
-    public static readonly EventBase ErrCloseTimeout = new()
-    {
-        EventId = 126,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "关闭动作超时 (> {0} ms)"
-    };
-    public static readonly EventBase ErrOpenKeepInterlockLost = new()
-    {
-        EventId = 127,
-        Severity = SeverityLevel.Error,
-        MessageTemplate = "打开保持中联锁丢失"
-    };
+    public static readonly EventBase ErrCloseInterlock = new() { EventId = 120, Severity = SeverityLevel.Error, MessageTemplate = "无法关闭：外部联锁不满足" };
+    public static readonly EventBase ErrOpenInterlock = new() { EventId = 121, Severity = SeverityLevel.Error, MessageTemplate = "无法打开：外部联锁不满足" };
+    public static readonly EventBase ErrSensorConflict = new() { EventId = 122, Severity = SeverityLevel.Error, MessageTemplate = "传感器异常：打开位和关闭位传感器同时亮" };
+    public static readonly EventBase ErrOpenInterlockLost = new() { EventId = 123, Severity = SeverityLevel.Error, MessageTemplate = "打开动作中联锁丢失" };
+    public static readonly EventBase ErrOpenTimeout = new() { EventId = 124, Severity = SeverityLevel.Error, MessageTemplate = "打开动作超时 (> {0} ms)" };
+    public static readonly EventBase ErrCloseInterlockLost = new() { EventId = 125, Severity = SeverityLevel.Error, MessageTemplate = "关闭动作中联锁丢失" };
+    public static readonly EventBase ErrCloseTimeout = new() { EventId = 126, Severity = SeverityLevel.Error, MessageTemplate = "关闭动作超时 (> {0} ms)" };
+    public static readonly EventBase ErrOpenKeepInterlockLost = new() { EventId = 127, Severity = SeverityLevel.Error, MessageTemplate = "打开保持中联锁丢失" };
     public static readonly EventBase ErrCloseKeepInterlockLost = new() { EventId = 128, Severity = SeverityLevel.Error, MessageTemplate = "关闭保持中联锁丢失" };
     public static readonly EventBase WarningLifetimeReached = new() { EventId = 140, Severity = SeverityLevel.Warning, MessageTemplate = "寿命到达 (PV:{0} , SP:{1})" };
 }
@@ -565,6 +473,7 @@ public static class ValveEvents
 public sealed class ValveSnapshot
 {
     public required string Name { get; init; }
+    public required ValveCmd TargetCmd { get; init; }
     public required ValveState State { get; init; }
     public required ValveAlarmState AlarmState { get; init; } = new();
     public required bool OpenSensor { get; init; }
