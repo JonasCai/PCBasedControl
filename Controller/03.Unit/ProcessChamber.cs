@@ -27,7 +27,7 @@ public class ProcessChamber : S88UnitBase
         switch (Step)
         {
             case 0:
-                if (_recipeEngine.Tick(EnterRecipeStepOnce, IsRecipeStepDone))
+                if (_recipeEngine.Tick(EnterRecipeStepOnce, OnRecipeStep, ExitRecipeStepOnce, IsRecipeStepDone))
                     Step++;
                 return false;
 
@@ -74,6 +74,32 @@ public class ProcessChamber : S88UnitBase
     }
 
     private void EnterRecipeStepOnce(IRecipeStep step)
+    {
+        switch (step)
+        {
+            case PulseStep p:
+                break;
+            case PurgeStep p:
+                break;
+            case MoveAxisStep m:
+                break;
+        }
+    }
+
+    private void OnRecipeStep(IRecipeStep step)
+    {
+        switch (step)
+        {
+            case PulseStep p:
+                break;
+            case PurgeStep p:
+                break;
+            case MoveAxisStep m:
+                break;
+        }
+    }
+
+    private void ExitRecipeStepOnce(IRecipeStep step)
     {
         switch (step)
         {

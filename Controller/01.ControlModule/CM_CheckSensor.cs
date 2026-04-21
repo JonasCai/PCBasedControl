@@ -22,7 +22,7 @@ public class CM_CheckSensor : S88ControlModuleBase
             throw new ArgumentException($"CM_CheckSensor[{_cfg.Name}]配置不完整", nameof(_cfg));
 
         // 初始化状态与监控目标
-        _expectedSignalState = _cfg.DefaultExpectedState;
+        _expectedSignalState = _cfg.DefaultExpectedSignalState;
         _currentTimeoutMs = _cfg.DefaultMismatchTimeoutMs;
         _currentSeverity = _cfg.DefaultMismatchSeverity;
         State = _cfg.AutoStartMonitoring ? CheckSensorState.Monitoring : CheckSensorState.Disabled;
@@ -267,7 +267,7 @@ public class CheckSensorCfg
     public SeverityLevel DefaultMismatchSeverity { get; init; } = SeverityLevel.Error;
 
     public bool AutoStartMonitoring { get; init; } = false;
-    public ExpectedSignalState DefaultExpectedState { get; init; } = ExpectedSignalState.Ignore;
+    public ExpectedSignalState DefaultExpectedSignalState { get; init; } = ExpectedSignalState.Ignore;
 
     public bool Validate()
     {

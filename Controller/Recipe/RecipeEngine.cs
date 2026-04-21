@@ -22,9 +22,11 @@ public class RecipeEngine
     /// 在 Unit 循环中调用 
     /// </summary> 
     /// <param name="onEnterStep">委托：让外部 Unit 执行单次触发动作</param> 
+    /// <param name="onExecuteStep">委托：让外部 Unit 执行循环触发动作</param> 
+    /// <param name="onExitStep">委托：让外部 Unit 执行单次触发动作</param> 
     /// <param name="onCheckDone">委托：让外部 Unit 检查该步是否完成</param> 
     /// <returns>返回 true 表示整个配方已经全部执行完毕</returns> 
-    public bool Tick(Action<IRecipeStep> onEnterStep, Func<IRecipeStep, long, bool> onCheckDone)
+    public bool Tick(Action<IRecipeStep> onEnterStep, Action<IRecipeStep> onExecuteStep, Action<IRecipeStep> onExitStep, Func<IRecipeStep, long, bool> onCheckDone)
     {
         if (_recipe == null || _stack.Count == 0) return true;
         var currentContext = _stack.Peek();
@@ -65,12 +67,16 @@ public class RecipeEngine
         if (!_stepEntered)
         {
             _stepEntered = true;
-            _stepStartMs = Environment.TickCount64; onEnterStep(s);
+            _stepStartMs = Environment.TickCount64; 
+            onEnterStep(s);
         }
+
+        onExecuteStep(s);
 
         // 询问外部的 Unit，配方动作是否执行完成
         if (onCheckDone(s, Environment.TickCount64 - _stepStartMs))
         {
+            onExitStep(s);
             currentContext.StepIndex++;
             _stepEntered = false;
         }

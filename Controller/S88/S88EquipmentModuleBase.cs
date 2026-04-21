@@ -1,6 +1,7 @@
 using Controller._01.ControlModule;
 using Controller.EventLogger;
 using Controller.gRPC;
+using Controller.Hardware;
 using Controller.S88;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
@@ -228,13 +229,99 @@ public abstract class S88EquipmentModuleBase : S88ObjectBase
             Name = name,
             ReadRawSignal = readSignal,
             DebounceTimeMs = debounceTimeMs,
-            DefaultExpectedState = defaultExpectedSignalState,
+            DefaultExpectedSignalState = defaultExpectedSignalState,
             DefaultMismatchTimeoutMs = defaultTimeoutMs,
             AutoStartMonitoring = autoStart
         };
         var sensor = factory.Create(cfg);
         RegisterCm(sensor);
         return sensor;
+    }
+
+    protected CM_Valve RegisterValve(
+        string name,
+        IValveFactory factory,
+        Action toOpen,
+        Action toClose,
+        DINode16? diNode = null,      // 绑定的数字量输入模块
+        int openSensorIndex = -1,     // 开启到位传感器通道号
+        int closeSensorIndex = -1,     // 关闭到位传感器通道号
+        Func<bool>? canOpen = null, // 开启(ToWork)的联锁条件
+        Func<bool>? canClose = null) // 关闭(ToHome)的联锁条件 
+    {
+        var cfg = new ValveCfg
+        {
+            Name = name,
+            Actuate = cmd =>
+            {
+                switch (cmd)
+                {
+                    case ValveCmd.ToOpen:
+                        toOpen();
+                        break;
+                    case ValveCmd.ToClose:
+                    case ValveCmd.ToSafe:
+                        toClose();
+                        break;
+                }
+            },
+
+            ReadOpenSensor = (diNode != null && openSensorIndex >= 0) ? () => diNode[openSensorIndex] : null,
+            ReadClosedSensor = (diNode != null && closeSensorIndex >= 0) ? () => diNode[closeSensorIndex] : null,
+            CanOpen = canOpen ?? (() => true),
+            CanClose = canClose ?? (() => true)
+        };
+
+        var valve = factory.Create(cfg);
+        RegisterCm(valve);
+        return valve;
+    }
+
+    protected CM_MFC RegisterMfc(
+        string name,
+        IMfcFactory factory,
+        MFCNode mfcNode,
+        float capacity,
+        Func<bool>? canOperate = null)
+    {
+        var cfg = new MfcCfg()
+        {
+            Name = name,
+            Capacity = capacity,
+            CanOperate = canOperate ?? (() => true), // 传入联锁委托
+            ReadPV = () => mfcNode.FlowReading,
+            WriteSP = sp => mfcNode.FlowSetting = sp,
+        };
+
+        var mfc = factory.Create(cfg);
+        RegisterCm(mfc);
+        return mfc;
+    }
+
+    protected CM_TempController RegisterTempController(
+        string name,
+        ITempControllerFactory factory,
+        Func<float> readControlTemperature, // 读取温度的委托 (例如 () => iONodes.TC_01.Temperature )
+        Func<float>? readMonitorTemperature = null,
+        Action<bool>? setHeaterOn = null, // SSR固态继电器控制
+        Action<float>? setDutyRatio = null, // 调功器模拟量控制
+        Func<bool>? canExecute = null, // 温控启动的硬联锁
+        float maxSafeTemp = 200.0f) // 绝对安全温度
+    {
+        var cfg = new TempControllerCfg
+        {
+            Name = name,
+            ReadControlTemp = readControlTemperature,
+            ReadMonitorTemp = readMonitorTemperature,
+            SetHeaterOn = setHeaterOn,
+            SetDutyRatio = setDutyRatio,
+            CanExecute = canExecute ?? (() => true),
+            AbsoluteMaxTempLimit = maxSafeTemp
+        };
+
+        var tc = factory.Create(cfg);
+        RegisterCm(tc);
+        return tc;
     }
 
     // ==========================================
