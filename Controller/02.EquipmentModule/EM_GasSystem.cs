@@ -11,7 +11,7 @@ namespace Controller._02.EquipmentModule;
 public class EM_GasSystem : S88EquipmentModuleBase
 {
     private GasSystemAction _selectedAction = GasSystemAction.None;
-    private IRecipeStep? _currentRecipeStep; // 缓存当前正在执行的配方参数
+    private IRecipeStep? _currentRecipeStep;
 
 
     public EM_GasSystem(EquipmentModuleCfg cfg, ILogger<S88EquipmentModuleBase> logger, IEventProducer eventProducer,
