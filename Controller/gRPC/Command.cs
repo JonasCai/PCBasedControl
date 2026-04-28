@@ -14,17 +14,24 @@ public enum Command
     ChangeManualOutput,
     ChangeSP,
     Complete,
+    DepressurizeSn,
     DownloadRecipe,
     Enable,
     EStop,
     Extend,
+    HeatingStart,
+    HeatingStop,
     Hold,
     Home,
+    LeakCheckSn,
     MoveAbs,
     MoveRel,
     MoveVelocity,
     NextStep,
     Open,
+    OperatorConfirm,
+    PumpDown,
+    PurgeLineSn,
     Reset,
     ResetStatistics,
     Retract,
@@ -41,7 +48,8 @@ public enum Command
     SwitchToManual,
     SwitchToNormalPid,
     Unhold,
-    Unsuspend
+    Unsuspend,
+    Vent
 }
 
 public static class CommandNames

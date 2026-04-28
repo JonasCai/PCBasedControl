@@ -69,7 +69,8 @@ public abstract class S88EquipmentModuleBase : S88ObjectBase
     public override void ToSafe()
     {
         PurgeCommands();
-        ChangeState(EMState.Idle);
+        if(State != EMState.Error)
+            ChangeState(EMState.Idle);
         var cache = _cMsCache;
         for (int i = 0; i < cache.Length; i++)
             cache[i].ToSafe();

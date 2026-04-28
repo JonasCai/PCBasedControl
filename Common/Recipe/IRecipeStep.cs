@@ -6,7 +6,8 @@ namespace Common.Recipe;
 // 指定 JSON 中用来区分类型的字段名为 "StepType"
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "StepType")] 
 [JsonDerivedType(typeof(PulseStep), typeDiscriminator: "Pulse")] 
-[JsonDerivedType(typeof(PurgeStep), typeDiscriminator: "Purge")] 
+[JsonDerivedType(typeof(PurgeStep), typeDiscriminator: "Purge")]
+[JsonDerivedType(typeof(PurgeLineStep), typeDiscriminator: "PurgeLine")]
 [JsonDerivedType(typeof(ReactionZoneStep), typeDiscriminator: "ReactionZone")] 
 [JsonDerivedType(typeof(MoveAxisStep), typeDiscriminator: "MoveAxis")] 
 [JsonDerivedType(typeof(WaitStep), typeDiscriminator: "Wait")] 
@@ -16,7 +17,7 @@ namespace Common.Recipe;
 [JsonDerivedType(typeof(SetPressureStep), typeDiscriminator: "SetPressure")] 
 [JsonDerivedType(typeof(WaitPressureStableStep), typeDiscriminator: "WaitPressureStable")] 
 [JsonDerivedType(typeof(SetTemperatureStep), typeDiscriminator: "SetTemperature")] 
-[JsonDerivedType(typeof(WaitTemperatureStableStep), typeDiscriminator: "WaitTemperatureStable")] 
+[JsonDerivedType(typeof(WaitTemperatureStableStep), typeDiscriminator: "WaitTemperatureStable")]
 public interface IRecipeStep 
 { 
     StepType StepType { get; } 
@@ -36,6 +37,7 @@ public enum StepType
     WaitTemperatureStable, // 等待温度稳定
     SetPressure, // 设定真空腔室压力
     WaitPressureStable, // 等待压力稳定
+    PurgeLine
 } 
 
 public class PulseStep : IRecipeStep 
@@ -51,7 +53,12 @@ public class PurgeStep : IRecipeStep
     [JsonIgnore] public StepType StepType { get; } = StepType.Purge; 
     public TimeSpan Duration { get; set; } 
     public float PurgeGasFlowSccm { get; set; } = 200.0f; 
-} 
+}
+
+public class PurgeLineStep : IRecipeStep
+{
+    [JsonIgnore] public StepType StepType { get; } = StepType.PurgeLine;
+}
 
 public class ReactionZoneStep : IRecipeStep 
 { 
@@ -87,16 +94,17 @@ public class WaitStep : IRecipeStep
 
 public class PumpDownStep : IRecipeStep 
 { 
-    [JsonIgnore] public StepType StepType { get; } = StepType.PumpDown; 
+    [JsonIgnore] public StepType StepType { get; } = StepType.PumpDown;
+    public float RoughingPressureThresholdPa { get; set; } = 500.0f;
     public float TargetPressurePa { get; set; } = 100.0f; 
-    public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(3); 
+    public uint TimeoutMs { get; set; } = 180000; 
 } 
 
 public class VentStep : IRecipeStep 
 { 
     [JsonIgnore] public StepType StepType { get; } = StepType.Vent; 
-    public float TargetPressurePa { get; set; } = 101325f; 
-    public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(3); 
+    public float TargetPressurePa { get; set; } = 101325f;
+    public uint TimeoutMs { get; set; } = 180000;
 } 
 
 public class SetPressureStep : IRecipeStep 

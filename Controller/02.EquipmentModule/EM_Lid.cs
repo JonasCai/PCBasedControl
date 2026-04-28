@@ -75,18 +75,6 @@ public class EM_Lid : S88EquipmentModuleBase
             ChangeState(EMState.Busy);
         }
 
-        // 松开按钮立即停止并报警！
-        if (State == EMState.Busy && !btnPressed)
-        {
-            AlarmState.ButtonReleasedError = true;
-        }
-
-        // 底层 CM 发生 Error 必须拉停 EM
-        if (HasAnyChildError())
-        {
-            AlarmState.ChildModuleFault = true;
-        }
-
         _lastBtnPressed = btnPressed;
 
         // 执行灯光刷新
@@ -110,19 +98,8 @@ public class EM_Lid : S88EquipmentModuleBase
 
     protected override void OnAbort()
     {
-        // 伺服立刻急停
-        LidAxis.Stop(emergency: true);
-
-        // 停止所有传感器的超时监控，防止急停后级联报警刷屏
-        Closed1_Detect.DisableMonitoring();
-        Closed2_Detect.DisableMonitoring();
-        Open1_Detect.DisableMonitoring();
-        Open2_Detect.DisableMonitoring();
-        Locked1_Detect.DisableMonitoring();
-        Locked2_Detect.DisableMonitoring();
-        Unlocked1_Detect.DisableMonitoring();
-        Unlocked2_Detect.DisableMonitoring();
-
+        ToSafe();
+        Step = 0;
         // 重置动作选择，强制要求 HMI 重新下发
         _selectedAction = LidAction.None;
 
@@ -137,14 +114,24 @@ public class EM_Lid : S88EquipmentModuleBase
         AlarmState.MissingOpenParameterError = false;
         AlarmState.MissingCloseParameterError = false;
         AlarmState.PinNotRetractedError = false;
+        AlarmState.ChildModuleFault = false;
 
         base.Reset(cmd);
     }
 
     protected override void AlarmHandler()
     {
-        // 评估底层状态
-        AlarmState.ChildModuleFault = HasAnyChildError();
+        // 松开按钮立即停止并报警！
+        if (State == EMState.Busy && !btnPressed)
+        {
+            AlarmState.ButtonReleasedError = true;
+        }
+
+        // 底层 CM 发生 Error 必须拉停 EM
+        if (HasAnyChildError())
+        {
+            AlarmState.ChildModuleFault = true;
+        }
 
         if (AlarmState.ButtonReleasedError) RaiseAlarm(LidEvents.ErrButtonReleased);
         else TryClearAlarm(LidEvents.ErrButtonReleased);
@@ -168,6 +155,7 @@ public class EM_Lid : S88EquipmentModuleBase
         if (State == EMState.Error && !AlarmState.HasAnyError)
         {
             ChangeState(EMState.Idle);
+            RaiseInfo(LidEvents.InfoResetDone);
         }
     }
 
@@ -582,6 +570,9 @@ public static class LidEvents
 
     public static readonly EventBase InfoCloseDone = new()
     { EventId = 2004, Severity = SeverityLevel.Info, MessageTemplate = "腔盖关闭完成" };
+
+    public static readonly EventBase InfoResetDone = new() 
+    { EventId = 3004, Severity = SeverityLevel.Info, MessageTemplate = "腔盖模组复位完成" };
 
     public static readonly EventBase ErrButtonReleased = new()
     { EventId = 2020, Severity = SeverityLevel.Error, MessageTemplate = "安全防呆触发：危险动作中松开了操作按钮，伺服已紧急制动！" };
