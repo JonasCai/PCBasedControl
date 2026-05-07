@@ -47,6 +47,8 @@ public enum Command
     SwitchToAutoTune,
     SwitchToManual,
     SwitchToNormalPid,
+    TransferReceive,
+    TransferSend,
     Unhold,
     Unsuspend,
     Vent
